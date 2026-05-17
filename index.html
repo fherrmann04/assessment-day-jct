@@ -1219,6 +1219,7 @@ tr:hover td { background: #faf9f7; }
           <th>Case II</th>
           <th>Gruppe</th>
           <th>Leistungstest</th>
+          <th>Zeit JCT (h)</th>
           <th>Veto</th>
           <th>Gesamt</th>
           <th>Status</th>
@@ -2894,10 +2895,12 @@ function renderHelfersheets() {
     Object.keys(byFormat).forEach(format => {
       const criteria = getCriteria(format);
       const allowsVeto = (format === 'intI' || format === 'intII');
+      const hasZeitJct = (format === 'intII');
       html += `<h4 style="margin:1.2rem 0 0.5rem;font-size:14px;font-weight:600;color:${FORMAT_TEXT[format] || '#000'}">${FORMAT_LABELS[format] || format}</h4>`;
       html += `<table class="criteria-table">
         <thead><tr><th style="width:140px">Bewerber:in</th>`;
       criteria.forEach(c => html += `<th>${c.label}</th>`);
+      if (hasZeitJct) html += `<th style="width:90px">Zeit für JCT (h)</th>`;
       if (allowsVeto) html += `<th style="width:50px">Veto</th>`;
       html += `<th>Notizen</th><th style="width:60px">Slot/Raum</th></tr></thead><tbody>`;
 
@@ -2929,6 +2932,13 @@ function renderHelfersheets() {
             html += '</div></td>';
           }
         });
+        if (hasZeitJct) {
+          const zeit = (data.zeitJct !== null && data.zeitJct !== undefined) ? data.zeitJct : '';
+          html += `<td><input type="number" min="0" max="200" step="0.5" placeholder="z.B. 5"
+            value="${zeit}"
+            oninput="setHelferZeitJct('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',this.value)"
+            style="width:78px;padding:6px 8px;text-align:center;font-family:'DM Mono',monospace"></td>`;
+        }
         if (allowsVeto) {
           html += `<td style="text-align:center">
             <div class="veto-toggle ${data.veto ? 'active' : ''}" onclick="toggleHelferVeto('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',this)">✕</div>
@@ -3018,26 +3028,61 @@ function setHelferNote(obs, cand, format, val) {
   pushHelferScores(obs);
 }
 
+// "Zeit für JCT" is an open question asked during Interview II. Numeric value
+// in hours per week, does NOT factor into the bewertung — just displayed in
+// the Noten table for the org's reference.
+function setHelferZeitJct(obs, cand, format, val) {
+  const key = cand + '||' + format;
+  if (!state.helferScores[obs]) state.helferScores[obs] = {};
+  if (!state.helferScores[obs][key]) state.helferScores[obs][key] = { scores: [], veto: false, notes: '' };
+  const num = val === '' ? null : parseFloat(val);
+  state.helferScores[obs][key].zeitJct = (num !== null && !isNaN(num)) ? num : null;
+  renderNoten();
+  pushHelferScores(obs);
+}
+
 function getCriteria(format) {
-  if (format === 'intI') return [{ label: 'Lebenslauf-Tiefe' }, { label: 'Kommunikation' }];
-  if (format === 'intII') return [{ label: 'Motivation' }, { label: 'Kommunikation' }];
+  // Interview I (biografiebezogen): special formula
+  // [(Organisation*2 + Kommunikation + Inhalt*2) / 5 + Bio1 + Bio2] / 3
+  // Groups encode the formula: "core" combines Org/Komm/Inhalt with weights;
+  // "bio1" and "bio2" are independent buckets. computeObserverFormatMean
+  // averages all buckets equally — so 3 buckets gives the /3 at the outer level.
+  if (format === 'intI') return [
+    { label: 'Organisation', group: 'core', weight: 2 },
+    { label: 'Kommunikation', group: 'core', weight: 1 },
+    { label: 'Inhalt', group: 'core', weight: 2 },
+    { label: 'Biographiebezogene Frage 1', group: 'bio1' },
+    { label: 'Biographiebezogene Frage 2', group: 'bio2' },
+  ];
+  // Interview II: simple mean of 3 criteria + separate "Zeit für JCT" field (h)
+  if (format === 'intII') return [
+    { label: 'Organisationsfrage 1' },
+    { label: 'Organisationsfrage 2' },
+    { label: 'Situative Frage' },
+  ];
   if (format === 'caseI' || format === 'caseII') return [
     { label: 'Denkvermögen · Frage 1', group: 'denken' },
     { label: 'Denkvermögen · Frage 2', group: 'denken' },
     { label: 'Denkvermögen · Frage 3', group: 'denken' },
     { label: 'Kommunikation', group: 'kommunikation' }
   ];
-  if (format === 'group') return [{ label: 'Teamfähigkeit' }, { label: 'Führungsstärke' }, { label: 'Kommunikation' }];
+  if (format === 'group') return [
+    { label: 'Expressivität' },
+    { label: 'Sensitivität' },
+    { label: 'Kommunikation' },
+  ];
   if (format === 'written') return [{ label: 'Note (1.00 – 5.00)', numericInput: true }];
   return [{ label: 'Bewertung' }];
 }
 
 // Compute a per-observer mean for one format, respecting group-weighting.
 // Returns null if no scores at all.
+// Within a group, scores are combined as a weighted mean (using cr.weight, default 1).
+// Across groups, group means are averaged equally.
 function computeObserverFormatMean(scores, format) {
   if (!scores || !scores.length) return null;
   const criteria = getCriteria(format);
-  // Group scores by their `group` attribute (or treat ungrouped scores as singletons)
+  // Collect weighted sums per group
   const groups = {};
   let hasAny = false;
   criteria.forEach((cr, i) => {
@@ -3045,12 +3090,14 @@ function computeObserverFormatMean(scores, format) {
     if (v === null || v === undefined || isNaN(v)) return;
     hasAny = true;
     const key = cr.group || `__solo${i}`;
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(v);
+    const w = cr.weight || 1;
+    if (!groups[key]) groups[key] = { sum: 0, weightSum: 0 };
+    groups[key].sum += v * w;
+    groups[key].weightSum += w;
   });
   if (!hasAny) return null;
-  // For each group, take the mean; then average all groups equally.
-  const groupMeans = Object.values(groups).map(arr => arr.reduce((a,b)=>a+b,0) / arr.length);
+  // Group means (weighted within the group)
+  const groupMeans = Object.values(groups).map(g => g.sum / g.weightSum);
   return groupMeans.reduce((a,b)=>a+b,0) / groupMeans.length;
 }
 
@@ -3062,8 +3109,11 @@ function aggregateNoten() {
   // For Cases: per-observer mean is (mean of 3 Denkvermögen-Fragen + Kommunikation) / 2
   const out = {};
   state.candidates.forEach(cand => {
-    out[cand] = { intI: null, intII: null, caseI: null, caseII: null, group: null, written: null, veto: false };
+    out[cand] = { intI: null, intII: null, caseI: null, caseII: null, group: null, written: null, veto: false, zeitJct: null };
   });
+
+  // Collect zeit-für-JCT values from intII entries (one entry per observer)
+  const zeitValues = {};  // cand -> [number, number, ...]
 
   Object.entries(state.helferScores).forEach(([obs, byKey]) => {
     Object.entries(byKey).forEach(([key, data]) => {
@@ -3080,7 +3130,19 @@ function aggregateNoten() {
       if (data.veto && (format === 'intI' || format === 'intII')) {
         out[cand].veto = true;
       }
+      // Collect zeit-für-JCT from intII
+      if (format === 'intII' && data.zeitJct !== null && data.zeitJct !== undefined && !isNaN(data.zeitJct)) {
+        if (!zeitValues[cand]) zeitValues[cand] = [];
+        zeitValues[cand].push(data.zeitJct);
+      }
     });
+  });
+
+  // Aggregate zeitJct as mean across observers
+  Object.entries(zeitValues).forEach(([cand, arr]) => {
+    if (arr.length && out[cand]) {
+      out[cand].zeitJct = arr.reduce((a,b)=>a+b,0) / arr.length;
+    }
   });
 
   state.candidates.forEach(cand => {
@@ -3137,6 +3199,7 @@ function renderNoten() {
       <td>${scoreBar(a.caseII)}</td>
       <td>${scoreBar(a.group)}</td>
       <td>${scoreBar(a.written)}</td>
+      <td class="mono text-sm" style="text-align:center">${a.zeitJct !== null && a.zeitJct !== undefined ? a.zeitJct.toFixed(1) : '<span class="text-faint">–</span>'}</td>
       <td>${a.veto ? '<span class="badge badge-danger">Veto</span>' : '<span class="badge badge-gray">–</span>'}</td>
       <td>${scoreBar(total, true)}</td>
       <td>${statusBadge(total, a.veto)}</td>
@@ -3179,14 +3242,15 @@ function buildDossierHtml(cand) {
   const total = vals.length ? vals.reduce((x,y)=>x+y,0) / vals.length : null;
 
   // Gather all observer entries for this candidate, grouped by format
-  // Returns { format: [{observer, scores, mean, veto, notes}, ...] }
+  // Returns { format: [{observer, scores, mean, veto, notes, zeitJct}, ...] }
   const byFormat = {};
   Object.entries(state.helferScores).forEach(([obs, byKey]) => {
     Object.entries(byKey).forEach(([key, data]) => {
       const [c, format] = key.split('||');
       if (c !== cand) return;
       const hasData = data.scores.some(s => s !== null && s !== undefined && !isNaN(s)) ||
-                      data.veto || (data.notes && data.notes.trim());
+                      data.veto || (data.notes && data.notes.trim()) ||
+                      (data.zeitJct !== null && data.zeitJct !== undefined && !isNaN(data.zeitJct));
       if (!hasData) return;
       if (!byFormat[format]) byFormat[format] = [];
       byFormat[format].push({
@@ -3194,7 +3258,8 @@ function buildDossierHtml(cand) {
         scores: data.scores,
         mean: computeObserverFormatMean(data.scores, format),
         veto: data.veto,
-        notes: data.notes || ''
+        notes: data.notes || '',
+        zeitJct: data.zeitJct,
       });
     });
   });
@@ -3205,6 +3270,10 @@ function buildDossierHtml(cand) {
   if (meta.degree) metaParts.push(meta.degree);
   if (meta.program) metaParts.push(meta.program);
   if (meta.semester) metaParts.push(`${meta.semester}. Fachsemester`);
+  // Zeit für JCT shown as additional info if available
+  const zeitInfo = (a.zeitJct !== null && a.zeitJct !== undefined)
+    ? `<div style="font-size:12px;color:var(--text-muted);margin-top:1px">Zeit für JCT: <strong>${a.zeitJct.toFixed(1)} h</strong></div>`
+    : '';
   const metaLine = metaParts.length ? metaParts.join(' · ') : '';
 
   let html = `<div class="print-sheet">
@@ -3217,6 +3286,7 @@ function buildDossierHtml(cand) {
         <div style="font-size:18px;font-weight:700">${cand}</div>
         ${metaLine ? `<div style="font-size:13px;color:var(--text);margin-top:2px">${metaLine}</div>` : ''}
         ${meta.university ? `<div style="font-size:12px;color:var(--text-muted);margin-top:1px">${meta.university}</div>` : ''}
+        ${zeitInfo}
         <div class="print-subtitle">${org}</div>
       </div>
     </div>
@@ -3253,6 +3323,9 @@ function buildDossierHtml(cand) {
     if (format === 'caseI' || format === 'caseII') {
       html += `<th style="width:70px;color:var(--text-muted)">∅ Denken</th>`;
     }
+    if (format === 'intII') {
+      html += `<th style="width:75px;color:var(--text-muted)">Zeit JCT</th>`;
+    }
     html += `<th style="width:60px">Mittel</th>`;
     if (allowsVeto) html += `<th style="width:50px">Veto</th>`;
     html += `<th>Notizen</th></tr></thead><tbody>`;
@@ -3284,6 +3357,10 @@ function buildDossierHtml(cand) {
       // For cases: show Denkvermögen-Zwischenmittel before the overall mean
       if (format === 'caseI' || format === 'caseII') {
         html += `<td class="mono" style="text-align:center;color:var(--text-muted);font-size:11px" title="Mittel der 3 Denkvermögen-Fragen">${denkenMean !== null ? '∅ ' + denkenMean.toFixed(2) : '–'}</td>`;
+      }
+      if (format === 'intII') {
+        const zVal = (e.zeitJct !== null && e.zeitJct !== undefined && !isNaN(e.zeitJct)) ? e.zeitJct.toFixed(1) + ' h' : '–';
+        html += `<td class="mono" style="text-align:center;color:var(--text-muted);font-size:11px">${zVal}</td>`;
       }
       html += `<td class="mono" style="text-align:center;font-weight:600">${e.mean !== null ? e.mean.toFixed(2) : '–'}</td>`;
       if (allowsVeto) {
@@ -3370,7 +3447,7 @@ function escapeHtml(s) {
 // ============================================================
 function exportCSV() {
   const agg = aggregateNoten();
-  const rows = [['Name','Alter','Abschluss','Studiengang','Universität','Fachsemester','Interview I','Interview II','Case I','Case II','Gruppe','Leistungstest','Veto','Gesamt']];
+  const rows = [['Name','Alter','Abschluss','Studiengang','Universität','Fachsemester','Interview I','Interview II','Case I','Case II','Gruppe','Leistungstest','Zeit JCT (h)','Veto','Gesamt']];
   state.candidates.forEach(cand => {
     const a = agg[cand];
     const meta = state.candidateMeta[cand] || {};
@@ -3389,6 +3466,7 @@ function exportCSV() {
       a.caseII?.toFixed(2) ?? '',
       a.group?.toFixed(2) ?? '',
       a.written?.toFixed(2) ?? '',
+      a.zeitJct !== null && a.zeitJct !== undefined ? a.zeitJct.toFixed(1) : '',
       a.veto ? 'Ja' : 'Nein',
       total !== null ? total.toFixed(2) : '',
     ]);
