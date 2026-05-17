@@ -1,0 +1,3471 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+  JCT ASSESSMENT DAY TOOL — Firebase-Setup-Anleitung
+================================================================================
+
+  Dieses Tool unterstützt Live-Synchronisation zwischen mehreren Geräten über
+  Firebase Firestore (Spark-Plan, kostenlos). Damit das funktioniert, musst du
+  einmalig ein Firebase-Projekt einrichten und die Config unten eintragen.
+
+  WICHTIG: Solange die Config nicht ausgefüllt ist, läuft die App im
+  "Lokal"-Modus — alle Daten bleiben nur auf diesem Gerät. Das funktioniert,
+  aber mehrere Beobachter:innen können nicht parallel arbeiten.
+
+  -------- SCHRITT-FÜR-SCHRITT-ANLEITUNG --------
+
+  1. Gehe zu https://console.firebase.google.com und logge dich mit einem
+     Google-Konto ein (idealerweise einem JCT- oder Logatik-Workspace-Konto).
+
+  2. Klick "Projekt erstellen" / "Add project".
+     - Name: z.B. "jct-assessment-day"
+     - Google Analytics: NEIN (nicht aktivieren)
+
+  3. Im linken Menü: "Build" -> "Firestore Database" -> "Datenbank erstellen".
+     - Modus: "Test mode starten" (öffnet die DB für 30 Tage frei zugänglich,
+       für den Event reicht das. Danach Rules verschärfen — siehe unten.)
+     - Region: "europe-west3 (Frankfurt)" oder "eur3 (europe-west)"
+       (NICHT US wegen DSGVO, Region kann nicht geändert werden!)
+
+  4. Im linken Menü: Zahnrad -> "Projekteinstellungen" -> "Deine Apps".
+     - Klicke das Web-Icon "</>"
+     - App-Spitzname: z.B. "Assessment Day App"
+     - "Firebase Hosting einrichten": NICHT anhaken
+     - Klick "App registrieren"
+     - Kopiere das angezeigte firebaseConfig-Objekt.
+
+  5. Trage die Config-Werte unten im SCRIPT-Block ein (Suche nach
+     "EDIT THIS CONFIG"). Speichere die Datei.
+
+  6. Lege die Datei auf einen Webserver (oder nutze GitHub Pages, das ist
+     gratis):
+     - Lokal im Browser öffnen (file:///) funktioniert NICHT mit Firebase
+       wegen Browser-Sicherheitsregeln.
+     - Empfohlen: GitHub Pages, Vercel, Netlify (alle kostenlos).
+     - Alternativ Cloudflare-Tunnel (wie für die Roboter-Demo).
+
+  7. Teile die URL mit dem Team. Jede:r öffnet sie und loggt sich ein.
+
+  -------- SICHERHEITS-RULES NACH DEM EVENT --------
+
+  Test mode läuft 30 Tage. Danach in Firebase Console -> Firestore -> "Rules"
+  einfach in einen restriktiven Modus setzen, z.B. nur Lesen:
+
+  rules_version = '2';
+  service cloud.firestore {
+    match /databases/{database}/documents {
+      match /{document=**} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+  }
+
+  Oder die Daten vor dem Event in Firestore Console -> "Daten" -> Sammlung
+  manuell löschen.
+
+  -------- DATEN-LAYOUT IN FIRESTORE --------
+
+  /events/assessment-day-current/meta/setup
+      -> alle Setup-Daten (Bewerber:innen, Beobachter:innen, wkw, Rotation)
+      -> wird nur von Organisator:innen geschrieben
+
+  /events/assessment-day-current/helferScores/{Beobachter-Name}
+      -> Bewertungs-Scores einer Person
+      -> wird nur von dieser Beobachter:in oder Organisator:in geschrieben
+
+  Bei mehreren Assessment Days kannst du oben "EVENT_ID" ändern, um die
+  Daten zu trennen.
+
+================================================================================
+-->
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Assessment Day Planer</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+<!-- ============================================================
+     FIREBASE CONFIGURATION
+     Replace the placeholder values below with your actual Firebase
+     project config. See setup instructions at the end of this file.
+     ============================================================ -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
+  import {
+    getFirestore, doc, setDoc, getDoc, onSnapshot, collection, deleteDoc,
+    enableIndexedDbPersistence, serverTimestamp
+  } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+
+  // ===== EDIT THIS CONFIG WITH YOUR FIREBASE PROJECT VALUES =====
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "000000000000",
+    appId: "1:000000000000:web:abcdef123456"
+  };
+  // ==============================================================
+
+  // Detect whether the config has been customized
+  const configReady = firebaseConfig.projectId && firebaseConfig.projectId !== 'YOUR_PROJECT_ID';
+
+  // Make these globally available for the rest of the app
+  window.__firebase = { firebaseConfig, configReady };
+
+  if (configReady) {
+    try {
+      const app = initializeApp(firebaseConfig);
+      const db = getFirestore(app);
+      // Enable offline cache so the app keeps working briefly if the network drops
+      enableIndexedDbPersistence(db).catch(() => {});
+      window.__firebase.app = app;
+      window.__firebase.db = db;
+      window.__firebase.doc = doc;
+      window.__firebase.setDoc = setDoc;
+      window.__firebase.getDoc = getDoc;
+      window.__firebase.onSnapshot = onSnapshot;
+      window.__firebase.collection = collection;
+      window.__firebase.deleteDoc = deleteDoc;
+      window.__firebase.serverTimestamp = serverTimestamp;
+      window.dispatchEvent(new Event('firebase-ready'));
+    } catch (err) {
+      console.error('Firebase init failed:', err);
+      window.__firebase.error = err.message;
+      window.dispatchEvent(new Event('firebase-error'));
+    }
+  }
+</script>
+
+<style>
+:root {
+  --bg: #f0f2f8;
+  --card: #ffffff;
+  --border: #dde1ef;
+  --border-strong: #bcc4dc;
+  --text: #061430;
+  --text-muted: #4a5470;
+  --text-faint: #9aa3be;
+  --accent: #061430;
+  --accent-light: #e8edf8;
+  --accent-mid: #2364E5;
+  --warn: #8b5a00;
+  --warn-light: #fdf4e0;
+  --danger: #c0392b;
+  --danger-light: #fde8e6;
+  --info: #2364E5;
+  --info-light: #e8edf8;
+  --radius: 8px;
+  --radius-lg: 14px;
+  --shadow: 0 1px 3px rgba(6,20,48,0.08), 0 4px 16px rgba(6,20,48,0.06);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* HEADER */
+.app-header {
+  background: #061430;
+  color: #fff;
+  padding: 0 2rem;
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  height: 56px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.app-logo {
+  font-family: 'DM Mono', monospace;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: #7a96d4;
+  white-space: nowrap;
+}
+.app-logo span { color: #fff; }
+
+.nav-tabs {
+  display: flex;
+  gap: 0;
+  height: 100%;
+  margin-left: auto;
+}
+.nav-tab {
+  font-size: 13px;
+  font-weight: 400;
+  color: #7a96d4;
+  padding: 0 1.2rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  height: 100%;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.nav-tab:hover { color: #fff; }
+.nav-tab.active { color: #fff; border-bottom-color: #2364E5; }
+
+/* MAIN */
+.main { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+
+/* CARDS */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  box-shadow: var(--shadow);
+}
+.card + .card { margin-top: 1.25rem; }
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 1.25rem;
+}
+
+/* GRID */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+
+/* FORM ELEMENTS */
+label { font-size: 13px; color: var(--text-muted); display: block; margin-bottom: 4px; }
+input[type=text], input[type=date], input[type=number], select, textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: #fff;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent-mid);
+}
+.field { margin-bottom: 1rem; }
+
+/* BUTTONS */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+.btn-primary {
+  background: #2364E5;
+  color: #fff;
+  border-color: #2364E5;
+}
+.btn-primary:hover { background: #1a50c2; }
+.btn-secondary {
+  background: #fff;
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.btn-secondary:hover { background: var(--bg); }
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: transparent;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.btn-ghost:hover { color: var(--danger); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+
+/* PERSON TAGS */
+.person-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; min-height: 36px; }
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #e8edf8;
+  color: #061430;
+  border: 1px solid #bcc4dc;
+}
+.tag .remove {
+  cursor: pointer;
+  opacity: 0.5;
+  font-size: 14px;
+  line-height: 1;
+}
+.tag .remove:hover { opacity: 1; }
+.tag.observer { background: #e8edf8; color: #2364E5; border-color: #bcc4dc; }
+
+.add-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.add-row input { flex: 1; }
+
+/* BADGE */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.badge-green { background: #e8edf8; color: #061430; }
+.badge-warn { background: var(--warn-light); color: var(--warn); }
+.badge-danger { background: var(--danger-light); color: var(--danger); }
+.badge-info { background: #e8edf8; color: #2364E5; }
+.badge-gray { background: #f0f2f8; color: var(--text-muted); }
+
+/* ALERT */
+.alert {
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.alert-warn { background: var(--warn-light); color: var(--warn); border: 1px solid #e8c89a; }
+.alert-success { background: var(--accent-light); color: var(--accent); border: 1px solid #b8d4be; }
+.alert-info { background: var(--info-light); color: var(--info); border: 1px solid #b0c8e0; }
+
+/* TABLE */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  background: #faf9f7;
+}
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #faf9f7; }
+
+/* ROTATION TABLE */
+.rot-table th:first-child, .rot-table td:first-child { width: 180px; font-weight: 500; }
+.slot-cell {
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  text-align: center;
+  white-space: nowrap;
+  display: inline-block;
+}
+.slot-int1 { background: #d9e8ff; color: #0a3a7c; }
+.slot-int2 { background: #b8d0f5; color: #0a3a7c; }
+.slot-case1 { background: #ffe0c8; color: #7a3e10; }
+.slot-case2 { background: #ffcaa5; color: #7a3e10; }
+.slot-written { background: #f5ecd0; color: #5b4810; }
+.slot-group { background: #c8e8d2; color: #1a4a2d; }
+.slot-conflict { background: #fde8e6; color: #c0392b; border: 1px solid #f0b0a8; }
+
+/* SCORE BUTTONS */
+.score-boxes { display: flex; gap: 4px; }
+.score-btn {
+  width: 32px; height: 32px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  background: #fff;
+  transition: all 0.12s;
+  user-select: none;
+  flex-shrink: 0;
+}
+.score-btn:hover { border-color: #2364E5; color: #2364E5; background: #e8edf8; }
+.score-btn.selected-1, .score-btn.selected-2 { background: #2364E5; color: #fff; border-color: #2364E5; }
+.score-btn.selected-3 { background: #f59e0b; color: #fff; border-color: #d97706; }
+.score-btn.selected-4, .score-btn.selected-5 { background: #c0392b; color: #fff; border-color: #a32d2d; }
+
+.veto-toggle {
+  width: 32px; height: 32px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; cursor: pointer; background: #fff;
+  transition: all 0.12s; user-select: none;
+}
+.veto-toggle:hover { border-color: var(--danger); background: var(--danger-light); }
+.veto-toggle.active { background: var(--danger); border-color: var(--danger); color: #fff; }
+.notes-input {
+  width: 100%; padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px; font-size: 12px;
+  font-family: inherit; color: var(--text);
+  background: #fff; resize: none; min-height: 32px;
+}
+
+/* SCORE DISPLAY */
+.score-bar-wrap { display: flex; align-items: center; gap: 8px; }
+.score-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.score-bar-fill { height: 100%; background: #2364E5; border-radius: 3px; transition: width 0.3s; }
+.score-val { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500; min-width: 28px; color: var(--text); }
+
+/* SECTION HEADER */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+.section-title { font-size: 18px; font-weight: 600; }
+.section-sub { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+
+/* STAT CARDS */
+.stat-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 1.25rem; }
+.stat-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.25rem;
+}
+.stat-num { font-size: 28px; font-weight: 600; font-family: 'DM Mono', monospace; color: var(--text); }
+.stat-label { font-size: 12px; color: var(--text-muted); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* WKW TABLE */
+.wkw-grid { display: grid; gap: 0; margin-top: 8px; }
+.wkw-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 10px 0;
+  border-bottom: 2px dashed #6b7595;
+}
+.wkw-row:last-child { border-bottom: none; }
+.wkw-row label { width: 160px; color: var(--text); flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.wkw-candidates { display: flex; flex-wrap: wrap; gap: 4px; }
+.wkw-check-label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.1s;
+}
+.wkw-check-label:hover { border-color: #2364E5; }
+.wkw-check-label.checked { background: #e8edf8; border-color: #2364E5; color: #2364E5; }
+.wkw-check-label input { display: none; }
+
+/* PRINT SHEET */
+.print-sheet {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 2rem;
+  margin-bottom: 1rem;
+  font-size: 13px;
+}
+.print-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid var(--text);
+}
+.print-title { font-size: 20px; font-weight: 700; }
+.print-subtitle { font-size: 13px; color: var(--text-muted); }
+.schedule-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+.schedule-table th {
+  background: #061430;
+  color: #fff;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 8px 12px;
+}
+.schedule-table td { padding: 9px 12px; border: 1px solid var(--border); }
+.schedule-table tr:nth-child(even) td { background: #faf9f7; }
+.station-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.criteria-table th { background: #faf9f7; }
+.criteria-table td { vertical-align: top; padding: 8px; }
+
+/* INNER TABS */
+.inner-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.inner-tab {
+  font-size: 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: all 0.15s;
+}
+.inner-tab:hover { color: var(--text); border-color: var(--border-strong); }
+.inner-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* VIEW */
+.view { display: none; }
+.view.active { display: block; }
+
+/* PRINT STYLES */
+@media print {
+  .app-header, .nav-tabs, .section-header .btn, .btn, .inner-tabs, .no-print { display: none !important; }
+  .main { padding: 0; max-width: 100%; }
+  .card { box-shadow: none; border: none; padding: 0; }
+  .print-sheet { page-break-after: always; border: 1px solid #ccc; }
+  body { background: #fff; }
+  /* When dossier is visible in noten view, hide the stat cards, table, and section header */
+  body.printing-dossier #noten-stats,
+  body.printing-dossier #view-noten > .section-header,
+  body.printing-dossier #view-noten > .card:not(#dossier-container .card) { display: none !important; }
+}
+
+/* RESPONSIVE */
+@media (max-width: 700px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .stat-cards { grid-template-columns: 1fr 1fr; }
+  .nav-tab { padding: 0 0.7rem; font-size: 12px; }
+}
+
+/* HELPERS */
+.mono { font-family: 'DM Mono', monospace; }
+.text-muted { color: var(--text-muted); }
+.text-faint { color: var(--text-faint); }
+.text-sm { font-size: 12px; }
+.text-bold { font-weight: 600; }
+.text-danger { color: var(--danger); }
+.mt-1 { margin-top: 0.5rem; }
+.mt-2 { margin-top: 1rem; }
+.mt-3 { margin-top: 1.5rem; }
+.flex { display: flex; }
+.gap-2 { gap: 0.5rem; }
+.gap-3 { gap: 1rem; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.empty-state { text-align: center; padding: 3rem 1rem; color: var(--text-faint); }
+.empty-state .icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+
+/* SETUP LOCK */
+.setup-lock {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 60vh;
+  padding: 2rem 1rem;
+}
+.setup-lock-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 2.5rem 2rem;
+  box-shadow: var(--shadow);
+  max-width: 460px;
+  width: 100%;
+  text-align: center;
+}
+.setup-lock-card.danger {
+  border-color: var(--danger);
+}
+.setup-lock-icon {
+  font-size: 2.5rem;
+  margin-bottom: 1rem;
+}
+.setup-lock-card h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--text);
+}
+.setup-lock-card p {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+}
+.setup-lock-input {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 0.5rem;
+}
+.setup-lock-input input, .setup-lock-input select {
+  flex: 1;
+}
+.setup-lock-error {
+  font-size: 12px;
+  color: var(--danger);
+  min-height: 18px;
+  margin-top: 0.5rem;
+}
+
+/* LOGIN OVERLAY (full-screen, blocks everything until user picks identity) */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.login-overlay .setup-lock-card { max-width: 520px; }
+.login-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+.login-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  transition: all 0.15s;
+}
+.login-option:hover { border-color: var(--accent-mid); background: var(--accent-light); }
+.login-option .role-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.login-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-top: 0.8rem;
+  margin-bottom: 0.3rem;
+  text-align: left;
+  font-weight: 600;
+}
+
+/* SYNC STATUS */
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #7a96d4;
+  padding: 0 1rem;
+  white-space: nowrap;
+}
+.sync-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #58cc6f;
+  flex-shrink: 0;
+}
+.sync-status.connecting .dot { background: #f0b441; animation: pulse 1.2s infinite; }
+.sync-status.offline .dot { background: #c0392b; }
+.sync-status.local .dot { background: #7a96d4; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.user-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(255,255,255,0.08);
+  padding: 4px 10px;
+  border-radius: 12px;
+  margin: 0 0.5rem;
+}
+.user-tag .role-pill {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #7a96d4;
+}
+
+/* MODAL OVERLAY */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 20, 48, 0.6);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+/* CANDIDATE LIST */
+.candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.candidate-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.4fr) 56px 90px minmax(110px, 1.4fr) minmax(110px, 1.4fr) 60px 28px;
+  gap: 5px;
+  align-items: center;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.candidate-row input, .candidate-row select {
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 4px;
+  font-family: inherit;
+}
+.candidate-row .cand-name { font-weight: 500; font-size: 13px; }
+.candidate-row .remove {
+  cursor: pointer;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 18px;
+  line-height: 1;
+  user-select: none;
+}
+.candidate-row .remove:hover { color: var(--danger); }
+.candidate-header {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.4fr) 56px 90px minmax(110px, 1.4fr) minmax(110px, 1.4fr) 60px 28px;
+  gap: 5px;
+  padding: 0 8px;
+  margin-top: 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* SLOT-TYPE PILL */
+.slot-type-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-left: 4px;
+  background: rgba(0,0,0,0.08);
+}
+
+/* SWAP CAND (klickbar im Rotationsplan) */
+.swap-cand {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: 500;
+  border: 1px dashed transparent;
+  transition: all 0.12s;
+  background: rgba(35, 100, 229, 0.06);
+}
+.swap-cand:hover {
+  border-color: var(--accent-mid);
+  background: var(--accent-light);
+}
+.swap-cand.conflict {
+  background: var(--danger-light);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  font-weight: 600;
+}
+.swap-cand.conflict:hover { background: #fad5cf; }
+.swap-cand.swap-selected {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+}
+
+/* SWAP POPUP */
+.swap-popup {
+  position: absolute;
+  z-index: 200;
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 24px rgba(6,20,48,0.18);
+  padding: 0.6rem;
+  min-width: 260px;
+  max-width: 340px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.swap-popup h5 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+.swap-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.swap-option:hover { background: var(--bg); }
+.swap-option .room-tag {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 1px 6px;
+  background: var(--bg);
+  border-radius: 8px;
+}
+.swap-option.would-conflict { color: var(--danger); }
+.swap-option.would-conflict .room-tag { background: var(--danger-light); color: var(--danger); }
+.swap-popup .swap-close {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin-top: 0.5rem;
+  padding: 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================ LOGIN OVERLAY ============================================================ -->
+<div id="login-overlay" class="login-overlay" style="display:none">
+  <div class="setup-lock-card">
+    <div class="setup-lock-icon">👋</div>
+    <h2>Wer bist du?</h2>
+    <p>Wähle deinen Namen aus, um dein persönliches Bewertungs-Sheet zu öffnen. Falls du Organisator:in bist, kannst du mit Passwort zusätzlich Setup und Rotation verwalten.</p>
+
+    <div id="login-options-container">
+      <div id="login-loading" style="color:var(--text-muted);font-size:13px">Lade Beobachter:innen-Liste…</div>
+    </div>
+
+    <div class="login-section-title">Organisator:innen-Zugang</div>
+    <div class="setup-lock-input">
+      <input type="password" id="org-login-pwd" placeholder="Org-Passwort eingeben"
+             onkeydown="if(event.key==='Enter')loginAsOrg()">
+      <button class="btn btn-primary" onclick="loginAsOrg()">Als Org einloggen</button>
+    </div>
+    <div id="login-error" class="setup-lock-error"></div>
+  </div>
+</div>
+
+<header class="app-header">
+  <div class="app-logo">JCT <span>Assessment Day</span></div>
+  <div class="sync-status connecting" id="sync-status" title="Synchronisationsstatus">
+    <span class="dot"></span><span class="sync-label">Verbinde…</span>
+  </div>
+  <span class="user-tag" id="user-tag" style="display:none">
+    <span class="role-pill" id="user-role">Beobachter</span>
+    <span id="user-name">–</span>
+    <span style="cursor:pointer;opacity:0.6;margin-left:4px" onclick="logout()" title="Abmelden">×</span>
+  </span>
+  <nav class="nav-tabs">
+    <button class="nav-tab active" onclick="showView('setup', event)">① Setup</button>
+    <button class="nav-tab" onclick="showView('rotation', event)">② Rotation</button>
+    <button class="nav-tab" onclick="showView('teilnehmer', event)">③ Teilnehmersheets</button>
+    <button class="nav-tab" onclick="showView('helfer', event)">④ Helfersheets</button>
+    <button class="nav-tab" onclick="showView('noten', event)">⑤ Noten</button>
+  </nav>
+</header>
+
+<main class="main">
+
+<!-- ============================================================ SETUP ============================================================ -->
+<div id="view-setup" class="view active">
+
+  <!-- Password lock overlay -->
+  <div id="setup-lock" class="setup-lock">
+    <div class="setup-lock-card">
+      <div class="setup-lock-icon">🔒</div>
+      <h2>Setup geschützt</h2>
+      <p>Das Setup kann nur von Organisator:innen geändert werden. Andere Beobachter:innen finden ihre Bögen in <strong>Helfersheets</strong>.</p>
+      <div class="setup-lock-input">
+        <input type="password" id="setup-pwd" placeholder="Passwort"
+               onkeydown="if(event.key==='Enter')checkSetupPassword()">
+        <button class="btn btn-primary" onclick="checkSetupPassword()">Entsperren</button>
+      </div>
+      <div id="setup-lock-error" class="setup-lock-error"></div>
+    </div>
+  </div>
+
+  <div id="setup-content" style="display:none">
+  <div class="section-header">
+    <div>
+      <div class="section-title">Setup</div>
+      <div class="section-sub">Bewerber:innen, Beobachter:innen und Konfiguration eintragen</div>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-secondary btn-sm" onclick="loadDemo()">Demo-Daten laden</button>
+      <button class="btn btn-secondary btn-sm" onclick="openResetModal()" style="color:var(--danger)">🗑 Daten löschen</button>
+      <button class="btn btn-ghost btn-sm" onclick="lockSetup()">🔒 Sperren</button>
+    </div>
+  </div>
+
+  <div class="alert alert-info">
+    <span>ℹ️</span>
+    <div>
+      <strong>Struktur:</strong> 4 Zeitslots. Pro Slot laufen parallel: 6 Interview+Case-Räume (je 2 Bewerber:innen, tauschen nach Halbzeit), 1 Gruppendiskussion (6 Plätze), 1 Leistungstest (6 Plätze). Slot 1+3 nutzen Interview I / Case I, Slot 2+4 nutzen Interview II / Case II.
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <!-- LEFT: Meta -->
+    <div>
+      <div class="card">
+        <div class="card-title">Veranstaltung</div>
+        <div class="field"><label>Datum</label><input type="date" id="cfg-date" value="2026-05-23"></div>
+        <div class="field"><label>Semester</label><input type="text" id="cfg-sem" value="Sommersemester 2026"></div>
+        <div class="field"><label>Organisation</label><input type="text" id="cfg-org" value="Junior Consulting Team e.V."></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Räume</div>
+        <div class="field"><label>Interview+Case-Räume (kommagetrennt, 6 Stück)</label><input type="text" id="rooms-intcase" value="BL.111, BL.112, BL.115, BL.205, BL.206, BL.207"></div>
+        <div class="field"><label>Gruppendiskussion</label><input type="text" id="rooms-group" value="BL.217"></div>
+        <div class="field"><label>Leistungstest</label><input type="text" id="rooms-written" value="BL.218"></div>
+        <div class="field"><label>Checkpoint / Begrüßung</label><input type="text" id="rooms-entry" value="BL.001"></div>
+      </div>
+    </div>
+
+    <!-- RIGHT: People -->
+    <div>
+      <div class="card">
+        <div class="card-title">Bewerber:innen <span id="cand-count" class="badge badge-green">0</span></div>
+        <div class="add-row">
+          <input type="text" id="add-cand" placeholder="Name eingeben..." onkeydown="if(event.key==='Enter')addCandidate()">
+          <button class="btn btn-primary btn-sm" onclick="addCandidate()">+ Hinzufügen</button>
+        </div>
+        <div id="list-candidates" class="candidate-list"></div>
+        <p class="text-sm text-muted mt-1">Optimal: Vielfaches von 12 (z.B. 12, 18, 24). Maximal 24 Bewerber:innen pro Tag.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Interview-Beobachter:innen (fest im Raum) <span id="intFix-count" class="badge badge-info">0</span></div>
+        <div class="add-row">
+          <input type="text" id="add-intFix" placeholder="Name eingeben..." onkeydown="if(event.key==='Enter')addPerson('interviewersFixed','add-intFix')">
+          <button class="btn btn-primary btn-sm" onclick="addPerson('interviewersFixed','add-intFix')">+</button>
+        </div>
+        <div class="person-list" id="list-interviewersFixed"></div>
+        <p class="text-sm text-muted mt-1">Bleiben über alle Slots im selben Raum (max. 6). Bei weniger als 6: einige Räume haben nur rotierende Beobachter:innen.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Interview-Beobachter:innen (rotierend) <span id="intRot-count" class="badge badge-info">0</span></div>
+        <div class="add-row">
+          <input type="text" id="add-intRot" placeholder="Name eingeben..." onkeydown="if(event.key==='Enter')addPerson('interviewersRotating','add-intRot')">
+          <button class="btn btn-primary btn-sm" onclick="addPerson('interviewersRotating','add-intRot')">+</button>
+        </div>
+        <div class="person-list" id="list-interviewersRotating"></div>
+        <p class="text-sm text-muted mt-1">Wechseln pro Slot den Raum (max. 6).</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Case-Beobachter:innen (fest im Raum) <span id="caseFix-count" class="badge badge-info">0</span></div>
+        <div class="add-row">
+          <input type="text" id="add-caseFix" placeholder="Name eingeben..." onkeydown="if(event.key==='Enter')addPerson('caseObserversFixed','add-caseFix')">
+          <button class="btn btn-primary btn-sm" onclick="addPerson('caseObserversFixed','add-caseFix')">+</button>
+        </div>
+        <div class="person-list" id="list-caseObserversFixed"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Case-Beobachter:innen (rotierend) <span id="caseRot-count" class="badge badge-info">0</span></div>
+        <div class="add-row">
+          <input type="text" id="add-caseRot" placeholder="Name eingeben..." onkeydown="if(event.key==='Enter')addPerson('caseObserversRotating','add-caseRot')">
+          <button class="btn btn-primary btn-sm" onclick="addPerson('caseObserversRotating','add-caseRot')">+</button>
+        </div>
+        <div class="person-list" id="list-caseObserversRotating"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Gruppendiskussion-Beobachter:innen <span id="group-count" class="badge badge-info">0</span></div>
+        <div class="add-row">
+          <input type="text" id="add-group" placeholder="Name eingeben..." onkeydown="if(event.key==='Enter')addPerson('groupObservers','add-group')">
+          <button class="btn btn-primary btn-sm" onclick="addPerson('groupObservers','add-group')">+</button>
+        </div>
+        <div class="person-list" id="list-groupObservers"></div>
+        <p class="text-sm text-muted mt-1">Bewerten 4× die gleiche Übung pro Slot.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Leistungstest-Aufsicht <span id="written-count" class="badge badge-info">0</span></div>
+        <div class="add-row">
+          <input type="text" id="add-written" placeholder="Name eingeben..." onkeydown="if(event.key==='Enter')addPerson('writtenSupervisors','add-written')">
+          <button class="btn btn-primary btn-sm" onclick="addPerson('writtenSupervisors','add-written')">+</button>
+        </div>
+        <div class="person-list" id="list-writtenSupervisors"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- WKW -->
+  <div class="card mt-2">
+    <div class="card-title">wkw – wer kennt wen? <span class="text-sm text-muted" style="text-transform:none;font-weight:400">(Beobachter:in darf Bewerber:in nicht bewerten, wenn sie sich kennen)</span></div>
+    <div id="wkw-table">
+      <p class="text-muted text-sm">Trage zuerst Bewerber:innen und Beobachter:innen ein.</p>
+    </div>
+  </div>
+
+  <div class="mt-2 flex gap-3 justify-between items-center">
+    <div id="setup-status"></div>
+    <button class="btn btn-primary" onclick="generateRotation()">Rotation generieren →</button>
+  </div>
+  </div><!-- /setup-content -->
+</div>
+
+<!-- ============================================================ ROTATION ============================================================ -->
+<div id="view-rotation" class="view">
+
+  <!-- Password lock overlay (same password as setup) -->
+  <div id="rotation-lock" class="setup-lock">
+    <div class="setup-lock-card">
+      <div class="setup-lock-icon">🔒</div>
+      <h2>Rotationsplan geschützt</h2>
+      <p>Der Rotationsplan kann nur von Organisator:innen eingesehen werden. Beobachter:innen finden ihre Zuteilung direkt in <strong>Helfersheets</strong>.</p>
+      <div class="setup-lock-input">
+        <input type="password" id="rotation-pwd" placeholder="Passwort"
+               onkeydown="if(event.key==='Enter')checkRotationPassword()">
+        <button class="btn btn-primary" onclick="checkRotationPassword()">Entsperren</button>
+      </div>
+      <div id="rotation-lock-error" class="setup-lock-error"></div>
+    </div>
+  </div>
+
+  <div id="rotation-content-wrapper" style="display:none">
+  <div class="section-header">
+    <div>
+      <div class="section-title">Rotationsplan</div>
+      <div class="section-sub">Automatisch generiert – Bewerber:innen-Rotation und Beobachter:innen-Zuteilung</div>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-secondary btn-sm" onclick="generateRotation(true)">↻ Neu generieren</button>
+      <button class="btn btn-secondary btn-sm" onclick="window.print()">🖨 Drucken</button>
+      <button class="btn btn-ghost btn-sm" onclick="lockRotation()">🔒 Sperren</button>
+    </div>
+  </div>
+
+  <div class="stat-cards" id="rotation-stats"></div>
+  <div id="rotation-alerts"></div>
+  <div id="rotation-content">
+    <div class="empty-state"><div class="icon">📋</div>Noch kein Rotationsplan. Gehe zu Setup und klicke "Rotation generieren".</div>
+  </div>
+  </div><!-- /rotation-content-wrapper -->
+</div>
+
+<!-- ============================================================ TEILNEHMERSHEETS ============================================================ -->
+<div id="view-teilnehmer" class="view">
+  <div class="section-header">
+    <div>
+      <div class="section-title">Teilnehmersheets</div>
+      <div class="section-sub">Individueller Ablaufplan pro Bewerber:in</div>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="window.print()">🖨 Alle drucken</button>
+  </div>
+  <div id="teilnehmer-content">
+    <div class="empty-state"><div class="icon">📄</div>Zuerst Rotation generieren.</div>
+  </div>
+</div>
+
+<!-- ============================================================ HELFERSHEETS ============================================================ -->
+<div id="view-helfer" class="view">
+  <div class="section-header">
+    <div>
+      <div class="section-title">Helfersheets / Bewertungsbögen</div>
+      <div class="section-sub">Für Beobachter:innen – enthält nur die ihnen zugewiesenen Bewerber:innen</div>
+    </div>
+    <button class="btn btn-secondary btn-sm" onclick="window.print()">🖨 Alle drucken</button>
+  </div>
+
+  <div class="inner-tabs no-print" id="helfer-tabs"></div>
+  <div id="helfer-content">
+    <div class="empty-state"><div class="icon">📝</div>Zuerst Rotation generieren.</div>
+  </div>
+</div>
+
+<!-- ============================================================ NOTEN ============================================================ -->
+<div id="view-noten" class="view">
+  <div class="section-header">
+    <div>
+      <div class="section-title">Notenerfassung & Auswertung</div>
+      <div class="section-sub">Aggregiert aus Helfersheets – Gesamtergebnis pro Bewerber:in</div>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-secondary btn-sm" onclick="renderAllDossiers()">📋 Alle Dossiers</button>
+      <button class="btn btn-secondary btn-sm" onclick="exportCSV()">⬇ CSV exportieren</button>
+    </div>
+  </div>
+
+  <div class="stat-cards" id="noten-stats"></div>
+
+  <div class="card">
+    <div class="card-title">Noten nach Bewerber:in</div>
+    <div class="table-wrap">
+      <table id="noten-table">
+        <thead><tr>
+          <th>Bewerber:in</th>
+          <th>Alter</th>
+          <th>Abschluss</th>
+          <th>Studiengang</th>
+          <th>Universität</th>
+          <th>FS</th>
+          <th>Interview I</th>
+          <th>Interview II</th>
+          <th>Case I</th>
+          <th>Case II</th>
+          <th>Gruppe</th>
+          <th>Leistungstest</th>
+          <th>Veto</th>
+          <th>Gesamt</th>
+          <th>Status</th>
+          <th>Dossier</th>
+        </tr></thead>
+        <tbody id="noten-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="dossier-container"></div>
+</div>
+
+<!-- ============================================================ RESET MODAL ============================================================ -->
+<div id="reset-modal" class="modal-overlay" style="display:none">
+  <div class="setup-lock-card danger">
+    <div class="setup-lock-icon">⚠️</div>
+    <h2>Alle Daten löschen?</h2>
+    <p>Diese Aktion löscht <strong>alle</strong> Bewerber:innen, Beobachter:innen, wkw-Einträge, die Rotation und alle Bewertungen. Sie kann nicht rückgängig gemacht werden.</p>
+    <div class="setup-lock-input">
+      <input type="password" id="reset-pwd" placeholder="Lösch-Passwort eingeben"
+             onkeydown="if(event.key==='Enter')confirmReset()">
+      <button class="btn btn-danger" onclick="confirmReset()">Endgültig löschen</button>
+    </div>
+    <div id="reset-error" class="setup-lock-error"></div>
+    <button class="btn btn-ghost btn-sm" onclick="closeResetModal()" style="margin-top:0.5rem">Abbrechen</button>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+const state = {
+  candidates: [],
+  // Parallel meta data per candidate name -> { age, program, semester }
+  candidateMeta: {},
+  // Interview observers split into fixed (stay in room) and rotating
+  interviewersFixed: [],
+  interviewersRotating: [],
+  caseObserversFixed: [],
+  caseObserversRotating: [],
+  groupObservers: [],
+  writtenSupervisors: [],
+  wkw: {}, // observerName -> Set of candidateNames
+  config: {
+    date: '2026-05-23',
+    semester: 'Sommersemester 2026',
+    org: 'Junior Consulting Team e.V.',
+    slots: [
+      { label: 'Slot 1', time: '9:20 – 10:30', blocks: [{ time: '09:20 – 09:50' }, { time: '09:55 – 10:25' }], interviewType: 'I', caseType: 'I' },
+      { label: 'Slot 2', time: '10:50 – 12:00', blocks: [{ time: '10:50 – 11:20' }, { time: '11:25 – 11:55' }], interviewType: 'II', caseType: 'II' },
+      { label: 'Slot 3', time: '13:00 – 14:10', blocks: [{ time: '13:00 – 13:30' }, { time: '13:35 – 14:05' }], interviewType: 'I', caseType: 'I' },
+      { label: 'Slot 4', time: '14:30 – 15:40', blocks: [{ time: '14:30 – 15:00' }, { time: '15:05 – 15:35' }], interviewType: 'II', caseType: 'II' },
+    ],
+    breakTimes: ['10:30 – 10:50', '12:00 – 13:00', '14:10 – 14:30'],
+    startEvent: '08:45 – 09:00',
+    endEvent: '15:45 – 16:00',
+    numIntCaseRooms: 6,
+  },
+  rotation: null,
+  helferScores: {}, // observerName -> candidateName -> { scores: [], veto: bool, notes: str }
+};
+
+// ============================================================
+// FIREBASE LIVE SYNC
+// ============================================================
+// Data layout in Firestore:
+//   /events/{eventId}/setup/data        -> all setup state (candidates, observers, wkw, config, rotation)
+//   /events/{eventId}/helferScores/{observerName}  -> one doc per observer with their scores
+//
+// Reads: every client subscribes to /setup/data and to the entire helferScores collection.
+// Writes:
+//   - Org users write to /setup/data when they edit setup, generate rotation, swap candidates, etc.
+//   - Observers write only to their own /helferScores/{theirName} document.
+//
+// This minimises read fan-out: a single score click only touches one helferScores doc.
+
+const EVENT_ID = 'assessment-day-current';  // change per event if you want history
+
+const sync = {
+  enabled: false,
+  ready: false,
+  // 'org' (full edit) or 'observer:Name' (limited to own scores) or null (not logged in)
+  identity: null,
+  // Track pending writes to debounce score saves
+  pendingTimers: {},
+  // Unsubscribe functions for active listeners
+  unsubscribers: [],
+  // Throttle to avoid write loops when applying remote state
+  applyingRemote: false,
+};
+
+function setSyncStatus(status, label) {
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  el.className = 'sync-status ' + status;
+  el.querySelector('.sync-label').textContent = label;
+}
+
+async function firebaseInit() {
+  // Firebase SDK loads as an ES module (asynchronously). When the regular
+  // <script> code runs, window.__firebase may not exist yet. Wait briefly.
+  if (!window.__firebase) {
+    await new Promise(resolve => {
+      const handler = () => resolve();
+      window.addEventListener('firebase-ready', handler, { once: true });
+      window.addEventListener('firebase-error', handler, { once: true });
+      // Also poll for the case where the module has already finished but events fired before we listened
+      const start = Date.now();
+      const poll = setInterval(() => {
+        if (window.__firebase) { clearInterval(poll); resolve(); }
+        if (Date.now() - start > 5000) { clearInterval(poll); resolve(); }
+      }, 50);
+    });
+  }
+  if (!window.__firebase || !window.__firebase.configReady) {
+    sync.enabled = false;
+    setSyncStatus('local', 'Lokal (kein Firebase)');
+    return false;
+  }
+  // Wait for SDK init to complete (window.__firebase.db is set after init)
+  if (!window.__firebase.db) {
+    await new Promise(resolve => {
+      const handler = () => resolve();
+      window.addEventListener('firebase-ready', handler, { once: true });
+      window.addEventListener('firebase-error', handler, { once: true });
+      setTimeout(resolve, 8000);
+    });
+  }
+  if (!window.__firebase.db) {
+    sync.enabled = false;
+    setSyncStatus('offline', 'Firebase-Fehler');
+    return false;
+  }
+  sync.enabled = true;
+  sync.db = window.__firebase.db;
+  setSyncStatus('connecting', 'Verbinde mit Firebase…');
+
+  try {
+    await firebaseSubscribe();
+    sync.ready = true;
+    const statusEl = document.getElementById('sync-status');
+    statusEl.className = 'sync-status';
+    statusEl.querySelector('.sync-label').textContent = 'Synchronisiert';
+    return true;
+  } catch (err) {
+    console.error('Firebase subscribe failed:', err);
+    setSyncStatus('offline', 'Verbindung fehlgeschlagen');
+    return false;
+  }
+}
+
+async function firebaseSubscribe() {
+  const { db, doc, onSnapshot, collection } = window.__firebase;
+  // Listen to setup
+  const setupRef = doc(db, 'events', EVENT_ID, 'meta', 'setup');
+  const unsubSetup = onSnapshot(setupRef, snap => {
+    if (!snap.exists()) return;
+    sync.applyingRemote = true;
+    try {
+      const data = snap.data();
+      applyRemoteSetup(data);
+    } finally {
+      sync.applyingRemote = false;
+    }
+  }, err => {
+    console.error('Setup listener error:', err);
+    setSyncStatus('offline', 'Offline');
+  });
+  sync.unsubscribers.push(unsubSetup);
+
+  // Listen to all helferScores
+  const scoresRef = collection(db, 'events', EVENT_ID, 'helferScores');
+  const unsubScores = onSnapshot(scoresRef, snap => {
+    sync.applyingRemote = true;
+    try {
+      snap.docChanges().forEach(change => {
+        const obsName = change.doc.id;
+        if (change.type === 'removed') {
+          delete state.helferScores[obsName];
+        } else {
+          state.helferScores[obsName] = change.doc.data().scores || {};
+        }
+      });
+      // Re-render dependent views
+      if (state.rotation) {
+        renderHelfersheets();
+        renderNoten();
+      }
+    } finally {
+      sync.applyingRemote = false;
+    }
+  }, err => {
+    console.error('Scores listener error:', err);
+    setSyncStatus('offline', 'Offline');
+  });
+  sync.unsubscribers.push(unsubScores);
+
+  // Ensure setup document exists
+  const { getDoc, setDoc } = window.__firebase;
+  const existing = await getDoc(setupRef);
+  if (!existing.exists()) {
+    await setDoc(setupRef, serializeSetup());
+  }
+}
+
+// Serialize setup-related state into a plain object for Firestore.
+// Sets must be converted to arrays.
+function serializeSetup() {
+  const wkwSer = {};
+  Object.entries(state.wkw).forEach(([obs, set]) => {
+    wkwSer[obs] = Array.from(set);
+  });
+  return {
+    candidates: state.candidates,
+    candidateMeta: state.candidateMeta,
+    interviewersFixed: state.interviewersFixed,
+    interviewersRotating: state.interviewersRotating,
+    caseObserversFixed: state.caseObserversFixed,
+    caseObserversRotating: state.caseObserversRotating,
+    groupObservers: state.groupObservers,
+    writtenSupervisors: state.writtenSupervisors,
+    wkw: wkwSer,
+    config: state.config,
+    rotation: state.rotation,
+    updatedAt: window.__firebase.serverTimestamp(),
+  };
+}
+
+function applyRemoteSetup(data) {
+  state.candidates = data.candidates || [];
+  state.candidateMeta = data.candidateMeta || {};
+  state.interviewersFixed = data.interviewersFixed || [];
+  state.interviewersRotating = data.interviewersRotating || [];
+  state.caseObserversFixed = data.caseObserversFixed || [];
+  state.caseObserversRotating = data.caseObserversRotating || [];
+  state.groupObservers = data.groupObservers || [];
+  state.writtenSupervisors = data.writtenSupervisors || [];
+  state.wkw = {};
+  Object.entries(data.wkw || {}).forEach(([obs, arr]) => {
+    state.wkw[obs] = new Set(arr);
+  });
+  if (data.config) state.config = data.config;
+  state.rotation = data.rotation || null;
+
+  // Re-render everything
+  ['candidates','interviewersFixed','interviewersRotating','caseObserversFixed','caseObserversRotating','groupObservers','writtenSupervisors'].forEach(list => renderPersonList(list));
+  updateCounts();
+  updateWkwTable();
+  if (state.rotation) {
+    renderRotation();
+    renderTeilnehmersheets();
+    renderHelfersheets();
+    renderNoten();
+    refreshLoginOptions();
+  } else {
+    refreshLoginOptions();
+  }
+}
+
+// Push setup changes (debounced) to Firestore. Only org users should call this.
+let setupPushTimer = null;
+function pushSetup() {
+  if (!sync.enabled || !sync.ready || sync.applyingRemote) return;
+  if (sync.identity !== 'org') return;  // observers cannot push setup
+  clearTimeout(setupPushTimer);
+  setupPushTimer = setTimeout(async () => {
+    try {
+      const { db, doc, setDoc } = window.__firebase;
+      await setDoc(doc(db, 'events', EVENT_ID, 'meta', 'setup'), serializeSetup());
+    } catch (err) {
+      console.error('Setup push failed:', err);
+      setSyncStatus('offline', 'Schreibfehler');
+    }
+  }, 400);
+}
+
+// Push helferScores for one observer (debounced per observer)
+function pushHelferScores(observerName) {
+  if (!sync.enabled || !sync.ready || sync.applyingRemote) return;
+  // Only org or the observer themselves may write to their scores doc
+  if (sync.identity !== 'org' && sync.identity !== 'observer:' + observerName) return;
+  clearTimeout(sync.pendingTimers[observerName]);
+  sync.pendingTimers[observerName] = setTimeout(async () => {
+    try {
+      const { db, doc, setDoc } = window.__firebase;
+      await setDoc(
+        doc(db, 'events', EVENT_ID, 'helferScores', observerName),
+        { scores: state.helferScores[observerName] || {}, updatedAt: window.__firebase.serverTimestamp() }
+      );
+    } catch (err) {
+      console.error('Score push failed for ' + observerName + ':', err);
+      setSyncStatus('offline', 'Schreibfehler');
+    }
+  }, 300);
+}
+
+// ============================================================
+// LOGIN / IDENTITY
+// ============================================================
+function showLoginOverlay() {
+  document.getElementById('login-overlay').style.display = '';
+  refreshLoginOptions();
+}
+
+function hideLoginOverlay() {
+  document.getElementById('login-overlay').style.display = 'none';
+}
+
+function refreshLoginOptions() {
+  const container = document.getElementById('login-options-container');
+  if (!container) return;
+  const allObs = getAllObservers();
+  if (!allObs.length) {
+    container.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px">Noch keine Beobachter:innen eingetragen. Bitte zuerst als Organisator:in einloggen, um Setup anzulegen.</div>';
+    return;
+  }
+  // Group by role
+  const roles = [
+    { title: 'Interview-Beobachter:innen (fest)', list: state.interviewersFixed },
+    { title: 'Interview-Beobachter:innen (rotierend)', list: state.interviewersRotating },
+    { title: 'Case-Beobachter:innen (fest)', list: state.caseObserversFixed },
+    { title: 'Case-Beobachter:innen (rotierend)', list: state.caseObserversRotating },
+    { title: 'Gruppendiskussion-Beobachter:innen', list: state.groupObservers },
+    { title: 'Leistungstest-Aufsicht', list: state.writtenSupervisors },
+  ];
+  let html = '';
+  roles.forEach(role => {
+    if (!role.list.length) return;
+    html += `<div class="login-section-title">${role.title}</div><div class="login-options">`;
+    role.list.forEach(name => {
+      const safe = name.replace(/'/g,"\\'");
+      html += `<button class="login-option" onclick="loginAsObserver('${safe}')">
+        <span>${name}</span>
+        <span class="role-tag">Beobachter:in</span>
+      </button>`;
+    });
+    html += '</div>';
+  });
+  container.innerHTML = html;
+}
+
+function loginAsOrg() {
+  const input = document.getElementById('org-login-pwd');
+  const errorEl = document.getElementById('login-error');
+  if (input.value !== SETUP_PASSWORD) {
+    errorEl.textContent = 'Falsches Passwort.';
+    input.value = '';
+    input.focus();
+    return;
+  }
+  sync.identity = 'org';
+  input.value = '';
+  errorEl.textContent = '';
+  finalizeLogin();
+}
+
+function loginAsObserver(name) {
+  if (!state.interviewersFixed.includes(name) &&
+      !state.interviewersRotating.includes(name) &&
+      !state.caseObserversFixed.includes(name) &&
+      !state.caseObserversRotating.includes(name) &&
+      !state.groupObservers.includes(name) &&
+      !state.writtenSupervisors.includes(name)) {
+    document.getElementById('login-error').textContent = 'Beobachter:in nicht gefunden.';
+    return;
+  }
+  sync.identity = 'observer:' + name;
+  finalizeLogin();
+}
+
+function finalizeLogin() {
+  hideLoginOverlay();
+  // Update header user tag
+  const userTag = document.getElementById('user-tag');
+  const userName = document.getElementById('user-name');
+  const userRole = document.getElementById('user-role');
+  if (sync.identity === 'org') {
+    userTag.style.display = '';
+    userName.textContent = 'Organisator:in';
+    userRole.textContent = 'Org';
+    // Auto-unlock setup & rotation since they have the password anyway
+    unlockSetup();
+    unlockRotation();
+    // Default landing: setup
+    showViewById('setup');
+  } else if (sync.identity?.startsWith('observer:')) {
+    const name = sync.identity.slice('observer:'.length);
+    userTag.style.display = '';
+    userName.textContent = name;
+    userRole.textContent = 'Beobachter:in';
+    // Observers can only access helfersheets, teilnehmersheets and view of noten
+    // Setup and rotation remain locked. Send them straight to helfersheets.
+    showViewById('helfer');
+    // Auto-select their own helfersheet tab
+    setTimeout(() => {
+      const tabs = document.querySelectorAll('#helfer-tabs .inner-tab');
+      tabs.forEach((t, i) => {
+        if (t.textContent.trim() === name) {
+          switchHelferTab(i);
+        }
+      });
+    }, 200);
+  }
+}
+
+function logout() {
+  sync.identity = null;
+  document.getElementById('user-tag').style.display = 'none';
+  // Re-lock setup/rotation
+  lockSetup();
+  lockRotation();
+  showLoginOverlay();
+}
+
+function showViewById(id) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('view-' + id).classList.add('active');
+  // Find the matching nav tab
+  const idx = ['setup','rotation','teilnehmer','helfer','noten'].indexOf(id);
+  if (idx >= 0) document.querySelectorAll('.nav-tab')[idx].classList.add('active');
+}
+
+// Formats a candidate goes through; each candidate must do all 6.
+// Each "experience" maps to (station-type, subblock-position)
+// Interview+Case happen paired in the same room: per slot the candidate
+// is in EITHER Group / Written / (Interview+Case in slot of type I) / (Interview+Case in slot of type II).
+// Within an Interview+Case slot: one half is Interview, other half is Case.
+const FORMATS = ['intI', 'intII', 'caseI', 'caseII', 'group', 'written'];
+const FORMAT_LABELS = {
+  intI: 'Interview I', intII: 'Interview II',
+  caseI: 'Case I', caseII: 'Case II',
+  group: 'Gruppendiskussion', written: 'Leistungstest'
+};
+const FORMAT_COLORS = {
+  intI: 'slot-int1', intII: 'slot-int2',
+  caseI: 'slot-case1', caseII: 'slot-case2',
+  group: 'slot-group', written: 'slot-written'
+};
+const FORMAT_PILLS = {
+  intI: '#d9e8ff', intII: '#b8d0f5',
+  caseI: '#ffe0c8', caseII: '#ffcaa5',
+  group: '#c8e8d2', written: '#f5ecd0'
+};
+const FORMAT_TEXT = {
+  intI: '#0a3a7c', intII: '#0a3a7c',
+  caseI: '#7a3e10', caseII: '#7a3e10',
+  group: '#1a4a2d', written: '#5b4810'
+};
+
+// ============================================================
+// NAV
+// ============================================================
+function showView(id, ev) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('view-' + id).classList.add('active');
+  if (ev && ev.target) ev.target.classList.add('active');
+}
+
+// ============================================================
+// PEOPLE
+// ============================================================
+function addPerson(list, inputId) {
+  const input = document.getElementById(inputId);
+  const name = input.value.trim();
+  if (!name || state[list].includes(name)) { input.value = ''; return; }
+  state[list].push(name);
+  input.value = '';
+  renderPersonList(list);
+  updateWkwTable();
+  updateCounts();
+  pushSetup();
+  refreshLoginOptions();
+}
+
+function removePerson(list, name) {
+  state[list] = state[list].filter(n => n !== name);
+  delete state.wkw[name];
+  Object.values(state.wkw).forEach(s => s.delete(name));
+  renderPersonList(list);
+  updateWkwTable();
+  updateCounts();
+  pushSetup();
+  refreshLoginOptions();
+}
+
+// Candidates have richer data (age, degree, program, university, semester) and a dedicated UI
+function addCandidate() {
+  const input = document.getElementById('add-cand');
+  const name = input.value.trim();
+  if (!name || state.candidates.includes(name)) { input.value = ''; return; }
+  state.candidates.push(name);
+  state.candidateMeta[name] = { age: '', degree: '', program: '', university: '', semester: '' };
+  input.value = '';
+  renderPersonList('candidates');
+  updateWkwTable();
+  updateCounts();
+  refreshDependentViews();
+  pushSetup();
+}
+
+function removeCandidate(name) {
+  state.candidates = state.candidates.filter(n => n !== name);
+  delete state.candidateMeta[name];
+  Object.values(state.wkw).forEach(s => s.delete(name));
+  renderPersonList('candidates');
+  updateWkwTable();
+  updateCounts();
+  refreshDependentViews();
+  pushSetup();
+}
+
+function updateCandidateMeta(name, field, value) {
+  if (!state.candidateMeta[name]) state.candidateMeta[name] = { age: '', degree: '', program: '', university: '', semester: '' };
+  state.candidateMeta[name][field] = value;
+  // Live-refresh dependent views (noten table, dossier) but do NOT re-render
+  // the candidate row itself — that would steal input focus mid-typing.
+  refreshDependentViews();
+  pushSetup();
+}
+
+// Re-renders views that display candidate meta data: Noten table and any
+// open dossier. Call after add/remove/edit of candidates or their meta.
+function refreshDependentViews() {
+  if (document.getElementById('noten-tbody')) {
+    renderNoten();
+  }
+  // If a dossier is currently displayed, refresh it
+  const dossierContainer = document.getElementById('dossier-container');
+  if (dossierContainer && dossierContainer.innerHTML.trim()) {
+    // Find which candidate(s) are shown by inspecting the rendered dossier titles
+    const titleEls = dossierContainer.querySelectorAll('.print-sheet .print-header div[style*="text-align:right"] > div:first-child');
+    const candNames = Array.from(titleEls).map(el => el.textContent.trim()).filter(n => state.candidates.includes(n));
+    if (candNames.length === 1) {
+      showDossier(candNames[0]);
+    } else if (candNames.length > 1) {
+      renderAllDossiers();
+    }
+  }
+}
+
+function renderPersonList(list) {
+  const container = document.getElementById('list-' + list);
+  if (!container) return;
+  container.innerHTML = '';
+
+  // Special rendering for candidates: table-like rows with extra fields
+  if (list === 'candidates') {
+    // Header row for clarity
+    if (state.candidates.length > 0) {
+      const header = document.createElement('div');
+      header.className = 'candidate-header';
+      header.innerHTML = `
+        <span>Name</span>
+        <span>Alter</span>
+        <span>Abschluss</span>
+        <span>Studiengang</span>
+        <span>Universität</span>
+        <span>FS</span>
+        <span></span>
+      `;
+      container.appendChild(header);
+    }
+    state.candidates.forEach(name => {
+      const meta = state.candidateMeta[name] || { age: '', degree: '', program: '', university: '', semester: '' };
+      const safe = name.replace(/'/g,"\\'");
+      const row = document.createElement('div');
+      row.className = 'candidate-row';
+      // Degree dropdown
+      const degrees = ['', 'Bachelor', 'Master', 'Promotion'];
+      const degreeOpts = degrees.map(d => `<option value="${d}" ${meta.degree === d ? 'selected' : ''}>${d || '–'}</option>`).join('');
+      row.innerHTML = `
+        <span class="cand-name">${name}</span>
+        <input type="number" min="16" max="99" placeholder="Alter" value="${meta.age || ''}"
+               oninput="updateCandidateMeta('${safe}','age',this.value)">
+        <select oninput="updateCandidateMeta('${safe}','degree',this.value)">${degreeOpts}</select>
+        <input type="text" placeholder="Studiengang" value="${(meta.program || '').replace(/"/g,'&quot;')}"
+               oninput="updateCandidateMeta('${safe}','program',this.value)">
+        <input type="text" placeholder="Universität" value="${(meta.university || '').replace(/"/g,'&quot;')}"
+               oninput="updateCandidateMeta('${safe}','university',this.value)">
+        <input type="number" min="1" max="20" placeholder="FS" value="${meta.semester || ''}"
+               oninput="updateCandidateMeta('${safe}','semester',this.value)">
+        <span class="remove" title="Entfernen" onclick="removeCandidate('${safe}')">×</span>
+      `;
+      container.appendChild(row);
+    });
+    return;
+  }
+
+  // Default: pill / tag style for observers
+  const cls = ' observer';
+  state[list].forEach(name => {
+    const tag = document.createElement('span');
+    tag.className = 'tag' + cls;
+    tag.innerHTML = `${name} <span class="remove" onclick="removePerson('${list}','${name.replace(/'/g,"\\'")}')">×</span>`;
+    container.appendChild(tag);
+  });
+}
+
+function updateCounts() {
+  const set = (id, list) => { const el = document.getElementById(id); if (el) el.textContent = state[list].length; };
+  set('cand-count', 'candidates');
+  set('intFix-count', 'interviewersFixed');
+  set('intRot-count', 'interviewersRotating');
+  set('caseFix-count', 'caseObserversFixed');
+  set('caseRot-count', 'caseObserversRotating');
+  set('group-count', 'groupObservers');
+  set('written-count', 'writtenSupervisors');
+}
+
+// ============================================================
+// WKW
+// ============================================================
+function getAllObservers() {
+  return [...new Set([
+    ...state.interviewersFixed,
+    ...state.interviewersRotating,
+    ...state.caseObserversFixed,
+    ...state.caseObserversRotating,
+    ...state.groupObservers,
+    ...state.writtenSupervisors,
+  ])];
+}
+
+function updateWkwTable() {
+  const container = document.getElementById('wkw-table');
+  const allObs = getAllObservers();
+  const cands = state.candidates;
+
+  if (!allObs.length || !cands.length) {
+    container.innerHTML = '<p class="text-muted text-sm">Trage zuerst Bewerber:innen und Beobachter:innen ein.</p>';
+    return;
+  }
+
+  let html = '<div class="wkw-grid">';
+  allObs.forEach(obs => {
+    if (!state.wkw[obs]) state.wkw[obs] = new Set();
+    html += `<div class="wkw-row"><label title="${obs}">${obs}</label><div class="wkw-candidates">`;
+    cands.forEach(cand => {
+      const checked = state.wkw[obs].has(cand);
+      html += `<label class="wkw-check-label ${checked ? 'checked' : ''}">
+        <input type="checkbox" ${checked ? 'checked' : ''} onchange="toggleWkw('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}',this)">${cand}
+      </label>`;
+    });
+    html += '</div></div>';
+  });
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function toggleWkw(obs, cand, checkbox) {
+  if (!state.wkw[obs]) state.wkw[obs] = new Set();
+  if (checkbox.checked) state.wkw[obs].add(cand);
+  else state.wkw[obs].delete(cand);
+  checkbox.closest('.wkw-check-label').classList.toggle('checked', checkbox.checked);
+  pushSetup();
+}
+
+// ============================================================
+// ROTATION ALGORITHM
+// ============================================================
+// Core data structures after generateRotation():
+// state.rotation = {
+//   intCaseRooms: ['BL.111', ...],  // 6 rooms
+//   groupRoom, writtenRoom,
+//   // For each candidate: a 4-element array, one per slot.
+//   // Each element: { format: 'intI'|'caseI'|... , room: 'BL.111', position: 'A'|'B'|null, pair: candidateName|null }
+//   //   position A = does Interview in subblock 1, Case in subblock 2
+//   //   position B = does Case in subblock 1, Interview in subblock 2
+//   //   For group/written: position is null, pair is null
+//   candidateSchedule: { 'Eray K.': [slot0obj, slot1obj, slot2obj, slot3obj], ... },
+//   // For each slot, room layout:
+//   slotRooms: [ { 0: {pairA, pairB, interviewers, caseObservers}, 1: ..., 5: ..., group: [...], written: [...] }, ... ],
+//   // Observer assignments
+//   observerSchedule: { observerName: [slot0room|null, slot1room|null, ...] }
+// }
+// Take a non-deterministic generation flag: if true, also include random
+// shuffles in the search. Otherwise, only the deterministic order is tried.
+// In both cases, the result is the best (fewest wkw conflicts) found.
+function generateRotation(shuffle = false, switchToView = true) {
+  let cands = state.candidates.slice();
+  if (cands.length < 4) {
+    alert('Bitte mindestens 4 Bewerber:innen eintragen.');
+    return;
+  }
+  if (cands.length > 24) {
+    alert('Maximal 24 Bewerber:innen pro Tag möglich.');
+    return;
+  }
+
+  // Always search for the best conflict-free order.
+  // When the user explicitly clicks "Neu generieren" we additionally allow
+  // a different starting permutation, so the result feels fresh.
+  const best = findBestRotation(cands, shuffle ? 50 : 50);
+  cands = best.order;
+
+  const N = cands.length;
+  const NUM_ROOMS = 6;
+  const SLOTS = 4;
+
+  // ---- 1) Candidate schedule ----
+  // Goal: each candidate does all 6 formats over 4 slots.
+  // Group: 6 candidates per slot. Written: 6 per slot. IntCase: 12 per slot (6 rooms × 2).
+  // Each candidate visits: 1× group, 1× written, 2× intcase (one in slot-type-I, one in slot-type-II).
+  // The 2 intcase slots: in one slot the candidate is in "position A" (intI/intII first, case after), in the other "position B".
+  //
+  // Strategy: divide candidates into 4 buckets of 6 (or fewer). Each bucket has the same schedule pattern.
+  // Pattern over slots [s1, s2, s3, s4]:
+  //   bucket 0: intcase, group, intcase, written
+  //   bucket 1: group, intcase, written, intcase
+  //   bucket 2: intcase, written, intcase, group
+  //   bucket 3: written, intcase, group, intcase
+  // Verify: each candidate has exactly 1 group, 1 written, 2 intcase (one in slot 1 or 3 = type I, one in slot 2 or 4 = type II).
+  //   bucket 0: intcase@s1(I), group@s2, intcase@s3(I), written@s4  -> TWO type-I intcase, missing type II! BAD.
+  // Better patterns:
+  const patternStrings = [
+    ['intcase','group','intcase','written'],   // slot1=intcase(I), slot3=intcase(I) -> both I, bad
+  ];
+  // Let me design correctly: candidate must do intcase once in slot ∈ {1,3} and once in slot ∈ {2,4}.
+  // 4 patterns that each cover all 6 formats:
+  //   P0: intcase(s1=I) | group(s2)   | written(s3) | intcase(s4=II)
+  //   P1: intcase(s1=I) | written(s2) | group(s3)   | intcase(s4=II)
+  //   P2: group(s1)     | intcase(s2=II) | intcase(s3=I) | written(s4)
+  //   P3: written(s1)   | intcase(s2=II) | intcase(s3=I) | group(s4)
+  // Each candidate gets exactly: 1 group, 1 written, 1 intcase in {s1,s3} (type I), 1 intcase in {s2,s4} (type II) ✓
+  // Per-slot loads:
+  //   slot 1: P0+P1=intcase, P2=group, P3=written -> 2 intcase patterns
+  //   slot 2: P0=group, P1=written, P2+P3=intcase -> 2 intcase patterns
+  //   slot 3: P0=written, P1=group, P2+P3=intcase -> 2 intcase patterns (wait P2 says intcase, P3 says intcase) ✓
+  //   slot 4: P0+P1=intcase, P2=written, P3=group ✓
+  // We want 12 intcase-slots in each of 4 slots? No: 12 candidates in intcase per slot, but there are 6 candidates per pattern×slot.
+  // With 4 buckets of up to 6, intcase slots get 2 buckets × ≤6 = ≤12 candidates ✓
+  // group/written slots get 1 bucket × ≤6 = ≤6 candidates ✓
+  const patterns = [
+    ['intcase','group','written','intcase'],     // P0
+    ['intcase','written','group','intcase'],     // P1
+    ['group','intcase','intcase','written'],     // P2
+    ['written','intcase','intcase','group'],     // P3
+  ];
+
+  // Distribute candidates round-robin into 4 buckets
+  const buckets = [[],[],[],[]];
+  cands.forEach((c, i) => buckets[i % 4].push(c));
+
+  // Build candidateSchedule
+  const candidateSchedule = {};
+  cands.forEach(c => { candidateSchedule[c] = []; });
+
+  // First, figure out per-slot room assignments for intcase candidates.
+  // For each slot, collect all candidates whose pattern is 'intcase' in that slot.
+  const intcaseBySlot = [[],[],[],[]];
+  buckets.forEach((bucket, bi) => {
+    bucket.forEach(c => {
+      patterns[bi].forEach((p, slot) => {
+        if (p === 'intcase') intcaseBySlot[slot].push(c);
+      });
+    });
+  });
+
+  // Within each slot, pair up candidates into rooms.
+  // 12 candidates -> 6 rooms × 2 candidates each. If less, fill rooms 0..k.
+  // Also assign position A/B: A does Interview in subblock1, B does Case in subblock1.
+  // Try to balance: each candidate should be A once and B once across their two intcase slots.
+  // Tracker: which position each candidate has had
+  const positionsUsed = {}; // cand -> 'A' or 'B' (only one slot known so far)
+  cands.forEach(c => { positionsUsed[c] = null; });
+
+  // Allocate rooms per slot
+  const slotRooms = [[],[],[],[]];
+  for (let slot = 0; slot < SLOTS; slot++) {
+    const slotCands = intcaseBySlot[slot];
+    const rooms = [];
+    // Pair candidates 2-by-2 into rooms
+    for (let r = 0; r < NUM_ROOMS; r++) {
+      const candA = slotCands[r * 2];
+      const candB = slotCands[r * 2 + 1];
+      // Choose positions:
+      let posA, posB;
+      // If candA already has position 'A' from before, give them 'B' now (and vice versa).
+      if (candA && positionsUsed[candA] === 'A') { posA = 'B'; posB = 'A'; }
+      else if (candA && positionsUsed[candA] === 'B') { posA = 'A'; posB = 'B'; }
+      else if (candB && positionsUsed[candB] === 'A') { posA = 'B'; posB = 'A'; }
+      else if (candB && positionsUsed[candB] === 'B') { posA = 'A'; posB = 'B'; }
+      else { posA = 'A'; posB = 'B'; }
+
+      if (candA) positionsUsed[candA] = posA;
+      if (candB) positionsUsed[candB] = posB;
+
+      rooms.push({ roomIdx: r, candA, candB, posA, posB });
+    }
+    slotRooms[slot] = rooms;
+  }
+
+  // Now fill candidateSchedule from slotRooms and pattern info
+  buckets.forEach((bucket, bi) => {
+    bucket.forEach(c => {
+      patterns[bi].forEach((p, slot) => {
+        if (p === 'group') {
+          candidateSchedule[c].push({ kind: 'group', format: 'group', slot });
+        } else if (p === 'written') {
+          candidateSchedule[c].push({ kind: 'written', format: 'written', slot });
+        } else {
+          // intcase - find the room
+          const room = slotRooms[slot].find(r => r.candA === c || r.candB === c);
+          if (!room) {
+            candidateSchedule[c].push({ kind: 'intcase', slot, error: true });
+            return;
+          }
+          const isA = room.candA === c;
+          const position = isA ? room.posA : room.posB;
+          const pair = isA ? room.candB : room.candA;
+          // Slot type determines I or II
+          const slotCfg = state.config.slots[slot];
+          const intType = slotCfg.interviewType;  // 'I' or 'II'
+          const caseType = slotCfg.caseType;
+          // Position A: Interview in subblock 1, Case in subblock 2
+          // Position B: Case in subblock 1, Interview in subblock 2
+          candidateSchedule[c].push({
+            kind: 'intcase',
+            slot,
+            roomIdx: room.roomIdx,
+            position,
+            pair,
+            interviewFormat: 'int' + intType,    // intI or intII
+            caseFormat: 'case' + caseType,
+          });
+        }
+      });
+    });
+  });
+
+  // ---- 2) Observer schedule ----
+  // Interview Fixed: each stays in room 0..len-1. They observe ALL candidates that pass through their room.
+  // Interview Rotating: cycle through rooms across slots.
+  // Same for Case.
+  // Group/Written: all observers cover all 4 slots.
+  const observerSchedule = {}; // obs -> array of length 4, each element { room: idx or 'group'/'written'/null, type: 'interview'|'case'|'group'|'written' }
+
+  // Fixed interview observers
+  state.interviewersFixed.forEach((obs, i) => {
+    observerSchedule[obs] = [];
+    for (let slot = 0; slot < SLOTS; slot++) {
+      observerSchedule[obs].push({ type: 'interview', roomIdx: i < NUM_ROOMS ? i : null });
+    }
+  });
+
+  // Rotating interview observers: each visits a different room each slot
+  // Use a Latin-square-like cycle: observer j in slot s -> room (j + s) mod NUM_ROOMS
+  state.interviewersRotating.forEach((obs, j) => {
+    observerSchedule[obs] = [];
+    for (let slot = 0; slot < SLOTS; slot++) {
+      const roomIdx = (j + slot) % NUM_ROOMS;
+      observerSchedule[obs].push({ type: 'interview', roomIdx });
+    }
+  });
+
+  // Same for case
+  state.caseObserversFixed.forEach((obs, i) => {
+    observerSchedule[obs] = [];
+    for (let slot = 0; slot < SLOTS; slot++) {
+      observerSchedule[obs].push({ type: 'case', roomIdx: i < NUM_ROOMS ? i : null });
+    }
+  });
+
+  state.caseObserversRotating.forEach((obs, j) => {
+    observerSchedule[obs] = [];
+    for (let slot = 0; slot < SLOTS; slot++) {
+      const roomIdx = (j + slot) % NUM_ROOMS;
+      observerSchedule[obs].push({ type: 'case', roomIdx });
+    }
+  });
+
+  // Group/written: all 4 slots
+  state.groupObservers.forEach(obs => {
+    observerSchedule[obs] = [];
+    for (let slot = 0; slot < SLOTS; slot++) {
+      observerSchedule[obs].push({ type: 'group' });
+    }
+  });
+  state.writtenSupervisors.forEach(obs => {
+    observerSchedule[obs] = [];
+    for (let slot = 0; slot < SLOTS; slot++) {
+      observerSchedule[obs].push({ type: 'written' });
+    }
+  });
+
+  // ---- 3) Room list ----
+  const intCaseRooms = (document.getElementById('rooms-intcase')?.value || '')
+    .split(',').map(r => r.trim()).filter(Boolean);
+  while (intCaseRooms.length < NUM_ROOMS) intCaseRooms.push('Raum ' + (intCaseRooms.length + 1));
+  const groupRoom = document.getElementById('rooms-group')?.value || 'Gruppenraum';
+  const writtenRoom = document.getElementById('rooms-written')?.value || 'Testraum';
+  const entryRoom = document.getElementById('rooms-entry')?.value || 'Eingang';
+
+  state.rotation = {
+    intCaseRooms,
+    groupRoom,
+    writtenRoom,
+    entryRoom,
+    candidateSchedule,
+    slotRooms,
+    observerSchedule,
+    patterns,
+    buckets,
+  };
+
+  // Init helferScores entries for new (observer, candidate) pairs that exist after rotation
+  initHelferScoresFromRotation();
+
+  renderRotation();
+  renderTeilnehmersheets();
+  renderHelfersheets();
+  renderNoten();
+
+  pushSetup();
+
+  // Switch to rotation view (skip when called from loadDemo)
+  if (switchToView) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('view-rotation').classList.add('active');
+    document.querySelectorAll('.nav-tab')[1].classList.add('active');
+  }
+}
+
+// Tries `tries` random shuffles of the candidate order and returns the one
+// that produces the fewest wkw conflicts. The candidate order determines
+// bucket assignment (cands[i] -> bucket i % 4), which then determines room
+// pairings, which combined with the observer schedule determines who sees
+// whom — that's where conflicts originate.
+function findBestRotation(cands, tries) {
+  let best = { order: cands.slice(), conflicts: Infinity };
+  for (let t = 0; t < tries; t++) {
+    const order = cands.slice();
+    // Fisher-Yates shuffle
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    const conflicts = countConflictsForOrder(order);
+    if (conflicts < best.conflicts) {
+      best = { order, conflicts };
+      if (conflicts === 0) break;  // perfect, stop searching
+    }
+  }
+  // Always include the original (deterministic) order in the comparison
+  const origConflicts = countConflictsForOrder(cands);
+  if (origConflicts < best.conflicts) {
+    best = { order: cands.slice(), conflicts: origConflicts };
+  }
+  return best;
+}
+
+// Simulates the room assignment for a given candidate order and counts
+// wkw conflicts. Mirrors the logic in generateRotation but without
+// mutating state.
+function countConflictsForOrder(orderedCands) {
+  const NUM_ROOMS = 6;
+  const SLOTS = 4;
+  const patterns = [
+    ['intcase','group','written','intcase'],
+    ['intcase','written','group','intcase'],
+    ['group','intcase','intcase','written'],
+    ['written','intcase','intcase','group'],
+  ];
+  const buckets = [[],[],[],[]];
+  orderedCands.forEach((c, i) => buckets[i % 4].push(c));
+  // For each slot, which candidates are in intcase? Pair them into rooms.
+  const intcaseBySlot = [[],[],[],[]];
+  buckets.forEach((bucket, bi) => {
+    bucket.forEach(c => {
+      patterns[bi].forEach((p, slot) => {
+        if (p === 'intcase') intcaseBySlot[slot].push(c);
+      });
+    });
+  });
+  const groupBySlot = [[],[],[],[]];
+  const writtenBySlot = [[],[],[],[]];
+  buckets.forEach((bucket, bi) => {
+    bucket.forEach(c => {
+      patterns[bi].forEach((p, slot) => {
+        if (p === 'group') groupBySlot[slot].push(c);
+        else if (p === 'written') writtenBySlot[slot].push(c);
+      });
+    });
+  });
+  // Build room-by-slot pairings (room i has cands[2i], cands[2i+1])
+  let conflicts = 0;
+  for (let slot = 0; slot < SLOTS; slot++) {
+    for (let r = 0; r < NUM_ROOMS; r++) {
+      const cA = intcaseBySlot[slot][r * 2];
+      const cB = intcaseBySlot[slot][r * 2 + 1];
+      // Which interview & case observers see this room this slot?
+      const intObs = [];
+      state.interviewersFixed.forEach((o, i) => { if (i === r) intObs.push(o); });
+      state.interviewersRotating.forEach((o, j) => { if (((j + slot) % NUM_ROOMS) === r) intObs.push(o); });
+      const caseObs = [];
+      state.caseObserversFixed.forEach((o, i) => { if (i === r) caseObs.push(o); });
+      state.caseObserversRotating.forEach((o, j) => { if (((j + slot) % NUM_ROOMS) === r) caseObs.push(o); });
+      [...intObs, ...caseObs].forEach(o => {
+        if (cA && state.wkw[o] && state.wkw[o].has(cA)) conflicts++;
+        if (cB && state.wkw[o] && state.wkw[o].has(cB)) conflicts++;
+      });
+    }
+    // Group: observer j evaluates candidates at idx j and (j+1) mod numCands
+    const groupCands = groupBySlot[slot];
+    state.groupObservers.forEach((o, j) => {
+      if (!groupCands.length) return;
+      const myIdx = [j % groupCands.length, (j + 1) % groupCands.length];
+      myIdx.forEach(i => {
+        const c = groupCands[i];
+        if (c && state.wkw[o] && state.wkw[o].has(c)) conflicts++;
+      });
+    });
+    // Written: 1 supervisor sees all
+    state.writtenSupervisors.forEach(o => {
+      writtenBySlot[slot].forEach(c => {
+        if (state.wkw[o] && state.wkw[o].has(c)) conflicts++;
+      });
+    });
+  }
+  return conflicts;
+}
+
+// Which candidates does an observer evaluate, and in which format?
+// Returns array of { candidate, format, slot, room }
+function getCandidatesForObserver(obs) {
+  const rot = state.rotation;
+  if (!rot) return [];
+  const sched = rot.observerSchedule[obs];
+  if (!sched) return [];
+
+  const out = [];
+  sched.forEach((entry, slot) => {
+    if (entry.type === 'interview' && entry.roomIdx != null) {
+      // Find which candidates are in this room this slot in INTERVIEW seat
+      const room = rot.slotRooms[slot].find(r => r.roomIdx === entry.roomIdx);
+      if (!room) return;
+      // Position A: does Interview in subblock 1 (i.e. is the "interview candidate" for that half)
+      // Both candidates in the room are interviewed -- but at DIFFERENT subblock times.
+      // The interview observer sees BOTH candidates over the slot.
+      if (room.candA) out.push({ candidate: room.candA, format: state.rotation.candidateSchedule[room.candA].find(e => e.slot === slot)?.interviewFormat, slot, room: entry.roomIdx, subblock: room.posA === 'A' ? 1 : 2 });
+      if (room.candB) out.push({ candidate: room.candB, format: state.rotation.candidateSchedule[room.candB].find(e => e.slot === slot)?.interviewFormat, slot, room: entry.roomIdx, subblock: room.posB === 'A' ? 1 : 2 });
+    } else if (entry.type === 'case' && entry.roomIdx != null) {
+      const room = rot.slotRooms[slot].find(r => r.roomIdx === entry.roomIdx);
+      if (!room) return;
+      if (room.candA) out.push({ candidate: room.candA, format: state.rotation.candidateSchedule[room.candA].find(e => e.slot === slot)?.caseFormat, slot, room: entry.roomIdx, subblock: room.posA === 'A' ? 2 : 1 });
+      if (room.candB) out.push({ candidate: room.candB, format: state.rotation.candidateSchedule[room.candB].find(e => e.slot === slot)?.caseFormat, slot, room: entry.roomIdx, subblock: room.posB === 'A' ? 2 : 1 });
+    } else if (entry.type === 'group') {
+      // Each of the 6 group observers evaluates 2 candidates per slot.
+      // Each candidate is evaluated by 2 observers (pairwise overlap).
+      // Assignment: candidates 0..5 in slot, observers 0..5
+      //   observer j -> candidates (j) and (j+1) mod 6
+      // -> candidate 0: obs 5 & 0,  candidate 1: obs 0 & 1, ...
+      const groupCands = state.candidates.filter(c => {
+        const ce = rot.candidateSchedule[c].find(e => e.slot === slot);
+        return ce && ce.kind === 'group';
+      });
+      const obsIdx = state.groupObservers.indexOf(obs);
+      if (obsIdx === -1) return;
+      const numCands = groupCands.length;
+      if (numCands === 0) return;
+      // Determine which candidates this observer should rate:
+      // observer j watches candidates at indices j and (j+1) mod numCands.
+      // If fewer candidates than observers, some observers may have only 1 or 0.
+      const myCandIdx = [obsIdx % numCands, (obsIdx + 1) % numCands];
+      const seen = new Set();
+      myCandIdx.forEach(idx => {
+        const c = groupCands[idx];
+        if (c && !seen.has(c)) {
+          seen.add(c);
+          out.push({ candidate: c, format: 'group', slot });
+        }
+      });
+    } else if (entry.type === 'written') {
+      state.candidates.forEach(c => {
+        const ce = rot.candidateSchedule[c].find(e => e.slot === slot);
+        if (ce && ce.kind === 'written') {
+          out.push({ candidate: c, format: 'written', slot });
+        }
+      });
+    }
+  });
+  return out;
+}
+
+function initHelferScoresFromRotation() {
+  const allObs = Object.keys(state.rotation.observerSchedule);
+  allObs.forEach(obs => {
+    if (!state.helferScores[obs]) state.helferScores[obs] = {};
+    const myCands = getCandidatesForObserver(obs);
+    myCands.forEach(({ candidate, format }) => {
+      const key = candidate + '||' + format;
+      if (!state.helferScores[obs][key]) {
+        const crit = getCriteria(format);
+        state.helferScores[obs][key] = { scores: crit.map(() => null), veto: false, notes: '' };
+      }
+    });
+  });
+}
+
+// ============================================================
+// RENDER ROTATION
+// ============================================================
+function renderRotation() {
+  const rot = state.rotation;
+  if (!rot) return;
+  const cands = state.candidates;
+
+  // Count conflicts
+  const conflicts = countConflicts();
+
+  const statsEl = document.getElementById('rotation-stats');
+  statsEl.innerHTML = `
+    <div class="stat-card"><div class="stat-num">${cands.length}</div><div class="stat-label">Bewerber:innen</div></div>
+    <div class="stat-card"><div class="stat-num">${getAllObservers().length}</div><div class="stat-label">Beobachter:innen</div></div>
+    <div class="stat-card"><div class="stat-num">6+2</div><div class="stat-label">Räume</div></div>
+    <div class="stat-card"><div class="stat-num ${conflicts > 0 ? 'text-danger' : ''}">${conflicts}</div><div class="stat-label">wkw-Konflikte</div></div>
+  `;
+
+  const alertsEl = document.getElementById('rotation-alerts');
+  alertsEl.innerHTML = conflicts > 0
+    ? `<div class="alert alert-warn">⚠ ${conflicts} wkw-Konflikt(e) erkannt. Bitte Zuteilung manuell prüfen.</div>`
+    : `<div class="alert alert-success">✓ Keine wkw-Konflikte.</div>`;
+
+  // Main table: candidate × slot
+  let html = `<div class="card"><div class="card-title">Übersicht pro Bewerber:in</div><div class="table-wrap"><table class="rot-table"><thead><tr>
+    <th>Bewerber:in</th>
+    <th>Slot 1<br><span class="text-faint" style="font-weight:400;text-transform:none">${state.config.slots[0].time}</span></th>
+    <th>Slot 2<br><span class="text-faint" style="font-weight:400;text-transform:none">${state.config.slots[1].time}</span></th>
+    <th>Slot 3<br><span class="text-faint" style="font-weight:400;text-transform:none">${state.config.slots[2].time}</span></th>
+    <th>Slot 4<br><span class="text-faint" style="font-weight:400;text-transform:none">${state.config.slots[3].time}</span></th>
+  </tr></thead><tbody>`;
+
+  cands.forEach(c => {
+    html += `<tr><td><strong>${c}</strong></td>`;
+    rot.candidateSchedule[c].forEach(entry => {
+      html += '<td>';
+      if (entry.kind === 'group') {
+        html += `<span class="slot-cell slot-group">${FORMAT_LABELS.group}</span>`;
+      } else if (entry.kind === 'written') {
+        html += `<span class="slot-cell slot-written">${FORMAT_LABELS.written}</span>`;
+      } else if (entry.kind === 'intcase') {
+        const intF = entry.interviewFormat;
+        const caseF = entry.caseFormat;
+        const first = entry.position === 'A' ? intF : caseF;
+        const second = entry.position === 'A' ? caseF : intF;
+        const room = rot.intCaseRooms[entry.roomIdx] || `R${entry.roomIdx + 1}`;
+        html += `<div style="display:flex;flex-direction:column;gap:3px">
+          <span class="slot-cell ${FORMAT_COLORS[first]}">${FORMAT_LABELS[first]}</span>
+          <span class="slot-cell ${FORMAT_COLORS[second]}">${FORMAT_LABELS[second]}</span>
+          <span class="mono text-sm" style="color:var(--text-muted);font-size:10px">${room}</span>
+        </div>`;
+      }
+      html += '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div></div>';
+
+  // Per-slot room layout
+  html += '<div class="card mt-2"><div class="card-title">Detail pro Slot</div>';
+  html += '<p class="text-sm text-muted" style="margin-bottom:1rem">💡 <strong>Tipp:</strong> Klicke auf eine:n Bewerber:in, um sie:ihn mit einer:m anderen im selben Slot zu tauschen (z.B. bei wkw-Konflikten).</p>';
+  [0,1,2,3].forEach(slot => {
+    const slotCfg = state.config.slots[slot];
+    html += `<h4 style="font-size:13px;font-weight:600;margin:1rem 0 0.5rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">
+      ${slotCfg.label} · ${slotCfg.time}
+      <span class="slot-type-pill">Interview ${slotCfg.interviewType} · Case ${slotCfg.caseType}</span>
+    </h4>`;
+    html += '<div class="table-wrap"><table><thead><tr><th>Raum</th><th>Bewerber:innen</th><th>Subblock 1</th><th>Subblock 2</th><th>Beobachter:innen</th></tr></thead><tbody>';
+
+    // Interview+Case rooms
+    rot.slotRooms[slot].forEach(room => {
+      if (!room.candA && !room.candB) return;
+      const roomName = rot.intCaseRooms[room.roomIdx];
+      const intFmt = 'int' + slotCfg.interviewType;
+      const caseFmt = 'case' + slotCfg.caseType;
+      // subblock 1: posA does Interview, posB does Case
+      // subblock 2: posA does Case, posB does Interview
+      const sub1 = [
+        room.candA ? `${room.candA} <span class="slot-cell ${FORMAT_COLORS[intFmt]}">${FORMAT_LABELS[intFmt]}</span>` : '',
+        room.candB ? `${room.candB} <span class="slot-cell ${FORMAT_COLORS[caseFmt]}">${FORMAT_LABELS[caseFmt]}</span>` : ''
+      ].filter(Boolean).join('<br>');
+      const sub2 = [
+        room.candA ? `${room.candA} <span class="slot-cell ${FORMAT_COLORS[caseFmt]}">${FORMAT_LABELS[caseFmt]}</span>` : '',
+        room.candB ? `${room.candB} <span class="slot-cell ${FORMAT_COLORS[intFmt]}">${FORMAT_LABELS[intFmt]}</span>` : ''
+      ].filter(Boolean).join('<br>');
+
+      // Observers in this room this slot
+      const obsHere = Object.entries(rot.observerSchedule)
+        .filter(([_, sched]) => sched[slot].roomIdx === room.roomIdx && (sched[slot].type === 'interview' || sched[slot].type === 'case'))
+        .map(([name, sched]) => ({ name, type: sched[slot].type }));
+      const obsHtml = obsHere.map(o => {
+        const cls = o.type === 'interview' ? 'slot-int1' : 'slot-case1';
+        const lbl = o.type === 'interview' ? 'Int' : 'Case';
+        // Check conflict
+        const hasConflict = state.wkw[o.name] && [room.candA, room.candB].filter(Boolean).some(c => state.wkw[o.name].has(c));
+        return `<span class="slot-cell ${hasConflict ? 'slot-conflict' : cls}">${hasConflict ? '⚠ ' : ''}${o.name} (${lbl})</span>`;
+      }).join(' ');
+
+      // Make candidates clickable for swap
+      const candCellHtml = ['candA', 'candB'].map(pos => {
+        const c = room[pos];
+        if (!c) return '';
+        // Is this candidate in conflict with any observer in this room?
+        const cConflict = obsHere.some(o => state.wkw[o.name] && state.wkw[o.name].has(c));
+        const cls = cConflict ? 'swap-cand conflict' : 'swap-cand';
+        return `<span class="${cls}" onclick="openSwapMenu(${slot}, '${pos}', ${room.roomIdx}, this)">${cConflict ? '⚠ ' : ''}${c}</span>`;
+      }).filter(Boolean).join('<br>');
+
+      html += `<tr data-slot="${slot}" data-room="${room.roomIdx}">
+        <td class="mono text-sm">${roomName}</td>
+        <td>${candCellHtml}</td>
+        <td style="font-size:12px">${sub1}</td>
+        <td style="font-size:12px">${sub2}</td>
+        <td>${obsHtml || '<span class="text-faint text-sm">–</span>'}</td>
+      </tr>`;
+    });
+
+    // Group
+    const groupCands = state.candidates.filter(c => rot.candidateSchedule[c][slot].kind === 'group');
+    if (groupCands.length) {
+      const groupObsHere = state.groupObservers;
+      html += `<tr>
+        <td class="mono text-sm">${rot.groupRoom}</td>
+        <td><span class="slot-cell slot-group">${FORMAT_LABELS.group}</span><br>${groupCands.join('<br>')}</td>
+        <td colspan="2" style="font-size:12px;color:var(--text-muted)">Durchgehend</td>
+        <td>${groupObsHere.map(o => `<span class="slot-cell slot-group">${o}</span>`).join(' ')}</td>
+      </tr>`;
+    }
+    // Written
+    const writtenCands = state.candidates.filter(c => rot.candidateSchedule[c][slot].kind === 'written');
+    if (writtenCands.length) {
+      const wObsHere = state.writtenSupervisors;
+      html += `<tr>
+        <td class="mono text-sm">${rot.writtenRoom}</td>
+        <td><span class="slot-cell slot-written">${FORMAT_LABELS.written}</span><br>${writtenCands.join('<br>')}</td>
+        <td colspan="2" style="font-size:12px;color:var(--text-muted)">Durchgehend</td>
+        <td>${wObsHere.map(o => `<span class="slot-cell slot-written">${o}</span>`).join(' ')}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  });
+  html += '</div>';
+
+  document.getElementById('rotation-content').innerHTML = html;
+}
+
+function countConflicts() {
+  if (!state.rotation) return 0;
+  let count = 0;
+  const allObs = Object.keys(state.rotation.observerSchedule);
+  allObs.forEach(obs => {
+    const myCands = getCandidatesForObserver(obs);
+    myCands.forEach(({ candidate }) => {
+      if (state.wkw[obs] && state.wkw[obs].has(candidate)) count++;
+    });
+  });
+  return count;
+}
+
+// ============================================================
+// MANUAL SWAP: move candidates between rooms within the same slot
+// ============================================================
+function openSwapMenu(slot, position, roomIdx, anchorEl) {
+  // Close any existing popup
+  document.querySelectorAll('.swap-popup').forEach(p => p.remove());
+  document.querySelectorAll('.swap-cand.swap-selected').forEach(p => p.classList.remove('swap-selected'));
+  anchorEl.classList.add('swap-selected');
+
+  const rot = state.rotation;
+  const sourceRoom = rot.slotRooms[slot].find(r => r.roomIdx === roomIdx);
+  const sourceCand = sourceRoom[position];
+  if (!sourceCand) return;
+
+  // Collect swap candidates: all other intcase candidates in this slot
+  const options = [];
+  rot.slotRooms[slot].forEach(r => {
+    ['candA', 'candB'].forEach(pos => {
+      const c = r[pos];
+      if (!c || (r.roomIdx === roomIdx && pos === position)) return;
+      // What would conflicts look like after swapping sourceCand <-> c?
+      const wouldConflict = computeSwapConflict(slot, roomIdx, position, r.roomIdx, pos);
+      options.push({
+        candidate: c,
+        roomIdx: r.roomIdx,
+        roomName: rot.intCaseRooms[r.roomIdx],
+        position: pos,
+        wouldConflict,
+      });
+    });
+  });
+
+  // Build popup
+  const popup = document.createElement('div');
+  popup.className = 'swap-popup';
+  popup.innerHTML = `<h5>Tausche <strong>${sourceCand}</strong> mit:</h5>` +
+    options.map(o => `
+      <div class="swap-option ${o.wouldConflict ? 'would-conflict' : ''}"
+           onclick="doSwap(${slot}, '${position}', ${roomIdx}, '${o.position}', ${o.roomIdx})">
+        <span>${o.wouldConflict ? '⚠ ' : ''}${o.candidate}</span>
+        <span class="room-tag">${o.roomName}${o.wouldConflict ? ' · ' + o.wouldConflict + ' Konfl.' : ''}</span>
+      </div>
+    `).join('') +
+    `<button class="swap-close" onclick="closeSwapMenu()">Abbrechen</button>`;
+
+  document.body.appendChild(popup);
+  const rect = anchorEl.getBoundingClientRect();
+  // Position popup to the right of the clicked element
+  popup.style.top = (window.scrollY + rect.top) + 'px';
+  popup.style.left = (window.scrollX + rect.right + 10) + 'px';
+  // If popup goes off-screen on the right, position to the left instead
+  const popupRect = popup.getBoundingClientRect();
+  if (popupRect.right > window.innerWidth) {
+    popup.style.left = (window.scrollX + rect.left - popupRect.width - 10) + 'px';
+  }
+  // Click outside closes popup
+  setTimeout(() => {
+    document.addEventListener('click', closeSwapMenuOnOutside, { once: true });
+  }, 0);
+}
+
+function closeSwapMenuOnOutside(e) {
+  if (e.target.closest('.swap-popup') || e.target.closest('.swap-cand')) {
+    // re-arm
+    setTimeout(() => document.addEventListener('click', closeSwapMenuOnOutside, { once: true }), 0);
+    return;
+  }
+  closeSwapMenu();
+}
+
+function closeSwapMenu() {
+  document.querySelectorAll('.swap-popup').forEach(p => p.remove());
+  document.querySelectorAll('.swap-cand.swap-selected').forEach(p => p.classList.remove('swap-selected'));
+}
+
+// Returns total conflict count this slot after a hypothetical swap.
+function computeSwapConflict(slot, room1Idx, pos1, room2Idx, pos2) {
+  const rot = state.rotation;
+  const r1 = rot.slotRooms[slot].find(r => r.roomIdx === room1Idx);
+  const r2 = rot.slotRooms[slot].find(r => r.roomIdx === room2Idx);
+  if (!r1 || !r2) return 0;
+  // Save
+  const c1 = r1[pos1], c2 = r2[pos2];
+  // Swap
+  r1[pos1] = c2;
+  r2[pos2] = c1;
+  // Count conflicts only in these two rooms this slot
+  let conflicts = 0;
+  [r1, r2].forEach(r => {
+    const obsHere = Object.entries(rot.observerSchedule)
+      .filter(([_, sched]) => sched[slot].roomIdx === r.roomIdx && (sched[slot].type === 'interview' || sched[slot].type === 'case'))
+      .map(([name, _]) => name);
+    obsHere.forEach(o => {
+      if (r.candA && state.wkw[o] && state.wkw[o].has(r.candA)) conflicts++;
+      if (r.candB && state.wkw[o] && state.wkw[o].has(r.candB)) conflicts++;
+    });
+  });
+  // Restore
+  r1[pos1] = c1;
+  r2[pos2] = c2;
+  return conflicts;
+}
+
+// Performs the actual swap and rebuilds candidateSchedule + everything else.
+function doSwap(slot, pos1, room1Idx, pos2, room2Idx) {
+  closeSwapMenu();
+  const rot = state.rotation;
+  const r1 = rot.slotRooms[slot].find(r => r.roomIdx === room1Idx);
+  const r2 = rot.slotRooms[slot].find(r => r.roomIdx === room2Idx);
+  if (!r1 || !r2) return;
+  // Swap candidates between rooms
+  const tmp = r1[pos1];
+  r1[pos1] = r2[pos2];
+  r2[pos2] = tmp;
+
+  // Now rebuild candidateSchedule for the affected candidates (the two swapped)
+  // and update pair references for their roommates as well.
+  [r1, r2].forEach(r => {
+    [r.candA, r.candB].forEach(c => {
+      if (!c) return;
+      // Find this candidate's entry for this slot in the schedule and update it
+      const entry = rot.candidateSchedule[c].find(e => e.slot === slot);
+      if (!entry || entry.kind !== 'intcase') return;
+      entry.roomIdx = r.roomIdx;
+      const isA = r.candA === c;
+      entry.position = isA ? r.posA : r.posB;
+      entry.pair = isA ? r.candB : r.candA;
+    });
+  });
+
+  // Reset helferScores entries that might no longer be valid (observer-candidate pairings changed)
+  // The simplest safe approach: re-initialize new keys, leave existing ones (they retain data).
+  initHelferScoresFromRotation();
+
+  // Re-render rotation, helfersheets, teilnehmersheets
+  renderRotation();
+  renderTeilnehmersheets();
+  renderHelfersheets();
+  renderNoten();
+  pushSetup();
+}
+
+
+// ============================================================
+// TEILNEHMERSHEETS
+// ============================================================
+function renderTeilnehmersheets() {
+  if (!state.rotation) return;
+  const rot = state.rotation;
+  const date = document.getElementById('cfg-date').value;
+  const sem = document.getElementById('cfg-sem').value;
+  const org = document.getElementById('cfg-org').value;
+
+  let html = '';
+  state.candidates.forEach(cand => {
+    html += `<div class="print-sheet">
+      <div class="print-header">
+        <div>
+          <div class="print-title">Personalisierter Ablaufplan</div>
+          <div class="print-subtitle">${sem} · ${formatDate(date)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:18px;font-weight:700">${cand}</div>
+          <div class="print-subtitle">${org}</div>
+        </div>
+      </div>
+
+      <table class="schedule-table">
+        <thead><tr><th>Zeit</th><th>Raum</th><th>Station</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>${state.config.startEvent}</td>
+            <td class="mono">${rot.entryRoom}</td>
+            <td><span class="station-pill" style="background:#1a1816;color:#fff">Begrüßung</span></td>
+          </tr>`;
+
+    rot.candidateSchedule[cand].forEach((entry, slotIdx) => {
+      const slot = state.config.slots[slotIdx];
+      // Insert breaks before slots 2, 3 (lunch), 4
+      if (slotIdx === 1) {
+        html += `<tr style="background:#faf9f7"><td colspan="3" style="color:var(--text-muted);font-style:italic;font-size:12px">☕ Bio Break &nbsp; ${state.config.breakTimes[0]}</td></tr>`;
+      }
+      if (slotIdx === 2) {
+        html += `<tr style="background:#faf9f7"><td colspan="3" style="color:var(--text-muted);font-style:italic;font-size:12px">🍽 Mittagspause &nbsp; ${state.config.breakTimes[1]}</td></tr>`;
+      }
+      if (slotIdx === 3) {
+        html += `<tr style="background:#faf9f7"><td colspan="3" style="color:var(--text-muted);font-style:italic;font-size:12px">☕ Bio Break &nbsp; ${state.config.breakTimes[2]}</td></tr>`;
+      }
+
+      if (entry.kind === 'intcase') {
+        const room = rot.intCaseRooms[entry.roomIdx];
+        const intFmt = entry.interviewFormat;
+        const caseFmt = entry.caseFormat;
+        const first = entry.position === 'A' ? intFmt : caseFmt;
+        const second = entry.position === 'A' ? caseFmt : intFmt;
+        const pillF = `style="background:${FORMAT_PILLS[first]};color:${FORMAT_TEXT[first]}"`;
+        const pillS = `style="background:${FORMAT_PILLS[second]};color:${FORMAT_TEXT[second]}"`;
+        html += `
+          <tr><td>${slot.blocks[0].time}</td><td class="mono">${room}</td><td><span class="station-pill" ${pillF}>${FORMAT_LABELS[first]}</span></td></tr>
+          <tr><td>${slot.blocks[1].time}</td><td class="mono">${room}</td><td><span class="station-pill" ${pillS}>${FORMAT_LABELS[second]}</span></td></tr>`;
+      } else if (entry.kind === 'group') {
+        const pill = `style="background:${FORMAT_PILLS.group};color:${FORMAT_TEXT.group}"`;
+        html += `<tr><td>${slot.time}</td><td class="mono">${rot.groupRoom}</td><td><span class="station-pill" ${pill}>${FORMAT_LABELS.group}</span></td></tr>`;
+      } else if (entry.kind === 'written') {
+        const pill = `style="background:${FORMAT_PILLS.written};color:${FORMAT_TEXT.written}"`;
+        html += `<tr><td>${slot.time}</td><td class="mono">${rot.writtenRoom}</td><td><span class="station-pill" ${pill}>${FORMAT_LABELS.written}</span></td></tr>`;
+      }
+    });
+
+    html += `
+          <tr>
+            <td>${state.config.endEvent}</td>
+            <td class="mono">${rot.entryRoom}</td>
+            <td><span class="station-pill" style="background:#1a1816;color:#fff">Abschluss</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="margin-top:1.5rem;font-size:11px;color:var(--text-muted);text-align:center">${org}</p>
+    </div>`;
+  });
+
+  document.getElementById('teilnehmer-content').innerHTML = html || '<div class="empty-state"><div class="icon">📄</div>Keine Bewerber:innen eingetragen.</div>';
+}
+
+// ============================================================
+// HELFERSHEETS
+// ============================================================
+function renderHelfersheets() {
+  if (!state.rotation) return;
+
+  const allObs = Object.keys(state.rotation.observerSchedule);
+  const tabsEl = document.getElementById('helfer-tabs');
+  const contentEl = document.getElementById('helfer-content');
+
+  if (!allObs.length) {
+    contentEl.innerHTML = '<div class="empty-state"><div class="icon">📝</div>Keine Beobachter:innen eingetragen.</div>';
+    tabsEl.innerHTML = '';
+    return;
+  }
+
+  tabsEl.innerHTML = allObs.map((o, i) => `<button class="inner-tab ${i===0?'active':''}" onclick="switchHelferTab(${i})">${o}</button>`).join('');
+
+  const sem = document.getElementById('cfg-sem').value;
+  const date = document.getElementById('cfg-date').value;
+  const org = document.getElementById('cfg-org').value;
+
+  const sheets = allObs.map((obs, obsIdx) => {
+    const myCands = getCandidatesForObserver(obs);
+
+    // Group myCands by format for display
+    const byFormat = {};
+    myCands.forEach(entry => {
+      if (!byFormat[entry.format]) byFormat[entry.format] = [];
+      byFormat[entry.format].push(entry);
+    });
+
+    let html = `<div class="print-sheet" id="helfer-sheet-${obsIdx}">
+      <div class="print-header">
+        <div>
+          <div class="print-title">Bewertungsbogen</div>
+          <div class="print-subtitle">${sem} · ${formatDate(date)}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:18px;font-weight:700">${obs}</div>
+          <div class="print-subtitle">${org}</div>
+        </div>
+      </div>`;
+
+    if (!myCands.length) {
+      html += '<p class="text-muted">Keine Bewerber:innen zugewiesen.</p>';
+      html += '</div>';
+      return html;
+    }
+
+    Object.keys(byFormat).forEach(format => {
+      const criteria = getCriteria(format);
+      const allowsVeto = (format === 'intI' || format === 'intII');
+      html += `<h4 style="margin:1.2rem 0 0.5rem;font-size:14px;font-weight:600;color:${FORMAT_TEXT[format] || '#000'}">${FORMAT_LABELS[format] || format}</h4>`;
+      html += `<table class="criteria-table">
+        <thead><tr><th style="width:140px">Bewerber:in</th>`;
+      criteria.forEach(c => html += `<th>${c.label}</th>`);
+      if (allowsVeto) html += `<th style="width:50px">Veto</th>`;
+      html += `<th>Notizen</th><th style="width:60px">Slot/Raum</th></tr></thead><tbody>`;
+
+      byFormat[format].forEach(entry => {
+        const cand = entry.candidate;
+        const key = cand + '||' + format;
+        if (!state.helferScores[obs][key]) {
+          state.helferScores[obs][key] = { scores: criteria.map(() => null), veto: false, notes: '' };
+        }
+        const data = state.helferScores[obs][key];
+        const wkwConflict = state.wkw[obs] && state.wkw[obs].has(cand);
+        html += `<tr ${wkwConflict ? 'style="background:#fde8e6"' : ''}><td><strong>${cand}</strong>${wkwConflict ? ' <span class="badge badge-danger">wkw</span>' : ''}</td>`;
+        criteria.forEach((cr, crIdx) => {
+          const v = data.scores[crIdx];
+          if (cr.numericInput) {
+            // Numeric input for written test (decimal grade)
+            const inputVal = (v !== null && v !== undefined) ? v : '';
+            html += `<td><input type="number" class="numeric-grade" min="1" max="5" step="0.01" placeholder="z.B. 1.75" value="${inputVal}"
+              oninput="setHelferNumericScore('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',${crIdx},this.value)"
+              style="width:90px;padding:6px 8px;text-align:center;font-family:'DM Mono',monospace"></td>`;
+          } else {
+            html += '<td><div class="score-boxes">';
+            [1,2,3,4,5].forEach(n => {
+              const sel = v === n ? `selected-${n}` : '';
+              html += `<button class="score-btn ${sel}" onclick="setHelferScore('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',${crIdx},${n},this)">${n}</button>`;
+            });
+            html += '</div></td>';
+          }
+        });
+        if (allowsVeto) {
+          html += `<td style="text-align:center">
+            <div class="veto-toggle ${data.veto ? 'active' : ''}" onclick="toggleHelferVeto('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',this)">✕</div>
+          </td>`;
+        }
+        const notesVal = (data.notes || '').replace(/"/g, '&quot;');
+        html += `<td><textarea class="notes-input" rows="1" placeholder="Notizen…" onchange="setHelferNote('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',this.value)">${notesVal}</textarea></td>`;
+        const slotInfo = `Slot ${entry.slot + 1}` + (entry.room != null ? `, R${entry.room + 1}` : '');
+        html += `<td class="text-sm text-muted">${slotInfo}</td>`;
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    });
+
+    html += `<p style="margin-top:1.5rem;font-size:11px;color:var(--text-muted)"><strong>Skala:</strong> 1 = sehr gut · 2 = gut · 3 = befriedigend · 4 = ausreichend · 5 = mangelhaft &nbsp;|&nbsp; <strong>Veto</strong> (nur in Interviews verfügbar): Bewerber:in nicht aufnehmen.</p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:4px">${org}</p>
+    </div>`;
+    return html;
+  });
+
+  contentEl.innerHTML = sheets.map((s, i) => `<div class="helfer-view" style="${i===0?'':'display:none'}">${s}</div>`).join('');
+}
+
+function switchHelferTab(idx) {
+  document.querySelectorAll('.inner-tab').forEach((t, i) => t.classList.toggle('active', i === idx));
+  document.querySelectorAll('.helfer-view').forEach((v, i) => v.style.display = i === idx ? '' : 'none');
+}
+
+function setHelferScore(obs, cand, format, crIdx, val, btn) {
+  if (!state.helferScores[obs]) state.helferScores[obs] = {};
+  const key = cand + '||' + format;
+  if (!state.helferScores[obs][key]) {
+    state.helferScores[obs][key] = { scores: [], veto: false, notes: '' };
+  }
+  const cur = state.helferScores[obs][key].scores[crIdx];
+  state.helferScores[obs][key].scores[crIdx] = cur === val ? null : val;
+
+  // Update button visuals
+  const row = btn.closest('tr');
+  const boxGroups = Array.from(row.querySelectorAll('.score-boxes'));
+  boxGroups.forEach((group, gi) => {
+    if (group.contains(btn)) {
+      group.querySelectorAll('.score-btn').forEach((b, bi) => {
+        b.className = 'score-btn';
+        if (state.helferScores[obs][key].scores[gi] === bi + 1) {
+          b.classList.add(`selected-${bi + 1}`);
+        }
+      });
+    }
+  });
+  renderNoten();
+  pushHelferScores(obs);
+}
+
+function setHelferNumericScore(obs, cand, format, crIdx, val) {
+  if (!state.helferScores[obs]) state.helferScores[obs] = {};
+  const key = cand + '||' + format;
+  if (!state.helferScores[obs][key]) {
+    state.helferScores[obs][key] = { scores: [], veto: false, notes: '' };
+  }
+  const num = val === '' ? null : parseFloat(val);
+  // Clamp to 1.0 - 5.0
+  if (num !== null && !isNaN(num)) {
+    state.helferScores[obs][key].scores[crIdx] = Math.max(1, Math.min(5, num));
+  } else {
+    state.helferScores[obs][key].scores[crIdx] = null;
+  }
+  renderNoten();
+  pushHelferScores(obs);
+}
+
+function toggleHelferVeto(obs, cand, format, el) {
+  const key = cand + '||' + format;
+  if (!state.helferScores[obs]) state.helferScores[obs] = {};
+  if (!state.helferScores[obs][key]) state.helferScores[obs][key] = { scores: [], veto: false, notes: '' };
+  state.helferScores[obs][key].veto = !state.helferScores[obs][key].veto;
+  el.classList.toggle('active', state.helferScores[obs][key].veto);
+  renderNoten();
+  pushHelferScores(obs);
+}
+
+function setHelferNote(obs, cand, format, val) {
+  const key = cand + '||' + format;
+  if (!state.helferScores[obs]) state.helferScores[obs] = {};
+  if (!state.helferScores[obs][key]) state.helferScores[obs][key] = { scores: [], veto: false, notes: '' };
+  state.helferScores[obs][key].notes = val;
+  pushHelferScores(obs);
+}
+
+function getCriteria(format) {
+  if (format === 'intI') return [{ label: 'Lebenslauf-Tiefe' }, { label: 'Kommunikation' }];
+  if (format === 'intII') return [{ label: 'Motivation' }, { label: 'Kommunikation' }];
+  if (format === 'caseI' || format === 'caseII') return [
+    { label: 'Denkvermögen · Frage 1', group: 'denken' },
+    { label: 'Denkvermögen · Frage 2', group: 'denken' },
+    { label: 'Denkvermögen · Frage 3', group: 'denken' },
+    { label: 'Kommunikation', group: 'kommunikation' }
+  ];
+  if (format === 'group') return [{ label: 'Teamfähigkeit' }, { label: 'Führungsstärke' }, { label: 'Kommunikation' }];
+  if (format === 'written') return [{ label: 'Note (1.00 – 5.00)', numericInput: true }];
+  return [{ label: 'Bewertung' }];
+}
+
+// Compute a per-observer mean for one format, respecting group-weighting.
+// Returns null if no scores at all.
+function computeObserverFormatMean(scores, format) {
+  if (!scores || !scores.length) return null;
+  const criteria = getCriteria(format);
+  // Group scores by their `group` attribute (or treat ungrouped scores as singletons)
+  const groups = {};
+  let hasAny = false;
+  criteria.forEach((cr, i) => {
+    const v = scores[i];
+    if (v === null || v === undefined || isNaN(v)) return;
+    hasAny = true;
+    const key = cr.group || `__solo${i}`;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(v);
+  });
+  if (!hasAny) return null;
+  // For each group, take the mean; then average all groups equally.
+  const groupMeans = Object.values(groups).map(arr => arr.reduce((a,b)=>a+b,0) / arr.length);
+  return groupMeans.reduce((a,b)=>a+b,0) / groupMeans.length;
+}
+
+// ============================================================
+// NOTEN (auswertung)
+// ============================================================
+function aggregateNoten() {
+  // For each candidate × format: average of (per-observer means of criteria)
+  // For Cases: per-observer mean is (mean of 3 Denkvermögen-Fragen + Kommunikation) / 2
+  const out = {};
+  state.candidates.forEach(cand => {
+    out[cand] = { intI: null, intII: null, caseI: null, caseII: null, group: null, written: null, veto: false };
+  });
+
+  Object.entries(state.helferScores).forEach(([obs, byKey]) => {
+    Object.entries(byKey).forEach(([key, data]) => {
+      const [cand, format] = key.split('||');
+      if (!out[cand]) return;
+      if (!out[cand].__perObsMeans) out[cand].__perObsMeans = {};
+      if (!out[cand].__perObsMeans[format]) out[cand].__perObsMeans[format] = [];
+
+      const obsMean = computeObserverFormatMean(data.scores, format);
+      if (obsMean !== null) {
+        out[cand].__perObsMeans[format].push(obsMean);
+      }
+      // Veto only counts from interview formats
+      if (data.veto && (format === 'intI' || format === 'intII')) {
+        out[cand].veto = true;
+      }
+    });
+  });
+
+  state.candidates.forEach(cand => {
+    const perObs = out[cand].__perObsMeans || {};
+    ['intI','intII','caseI','caseII','group','written'].forEach(f => {
+      if (perObs[f] && perObs[f].length) {
+        out[cand][f] = perObs[f].reduce((a,b)=>a+b, 0) / perObs[f].length;
+      }
+    });
+    delete out[cand].__perObsMeans;
+  });
+
+  return out;
+}
+
+function renderNoten() {
+  if (!state.rotation) return;
+  const cands = state.candidates;
+  const agg = aggregateNoten();
+
+  // Stats
+  const rated = cands.filter(c => {
+    const a = agg[c];
+    return a.intI !== null || a.intII !== null || a.caseI !== null || a.caseII !== null || a.group !== null || a.written !== null;
+  });
+  const vetoCount = cands.filter(c => agg[c].veto).length;
+
+  document.getElementById('noten-stats').innerHTML = `
+    <div class="stat-card"><div class="stat-num">${cands.length}</div><div class="stat-label">Bewerber:innen</div></div>
+    <div class="stat-card"><div class="stat-num">${rated.length}</div><div class="stat-label">Bewertet</div></div>
+    <div class="stat-card"><div class="stat-num">${cands.length - rated.length}</div><div class="stat-label">Offen</div></div>
+    <div class="stat-card"><div class="stat-num">${vetoCount}</div><div class="stat-label">Vetos</div></div>
+  `;
+
+  const tbody = document.getElementById('noten-tbody');
+  tbody.innerHTML = '';
+  cands.forEach(cand => {
+    const a = agg[cand];
+    const vals = [a.intI, a.intII, a.caseI, a.caseII, a.group, a.written].filter(v => v !== null);
+    const total = vals.length ? vals.reduce((x,y)=>x+y,0) / vals.length : null;
+
+    const meta = state.candidateMeta[cand] || {};
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${cand}</strong></td>
+      <td class="mono text-sm">${meta.age || '<span class="text-faint">–</span>'}</td>
+      <td class="text-sm">${meta.degree || '<span class="text-faint">–</span>'}</td>
+      <td class="text-sm">${meta.program || '<span class="text-faint">–</span>'}</td>
+      <td class="text-sm">${meta.university || '<span class="text-faint">–</span>'}</td>
+      <td class="mono text-sm">${meta.semester || '<span class="text-faint">–</span>'}</td>
+      <td>${scoreBar(a.intI)}</td>
+      <td>${scoreBar(a.intII)}</td>
+      <td>${scoreBar(a.caseI)}</td>
+      <td>${scoreBar(a.caseII)}</td>
+      <td>${scoreBar(a.group)}</td>
+      <td>${scoreBar(a.written)}</td>
+      <td>${a.veto ? '<span class="badge badge-danger">Veto</span>' : '<span class="badge badge-gray">–</span>'}</td>
+      <td>${scoreBar(total, true)}</td>
+      <td>${statusBadge(total, a.veto)}</td>
+      <td><button class="btn btn-secondary btn-sm" onclick="showDossier('${cand.replace(/'/g,"\\'")}')">📋</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function scoreBar(val, bold) {
+  if (val === null || val === undefined) return '<span class="text-faint text-sm">–</span>';
+  const pct = ((5 - val) / 4) * 100;
+  const color = val <= 2 ? '#2364E5' : val <= 3 ? '#f59e0b' : '#c0392b';
+  return `<div class="score-bar-wrap">
+    <div class="score-bar"><div class="score-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+    <span class="score-val ${bold ? 'text-bold' : ''}">${val.toFixed(2)}</span>
+  </div>`;
+}
+
+function statusBadge(total, veto) {
+  if (veto) return '<span class="badge badge-danger">Veto</span>';
+  if (total === null) return '<span class="badge badge-gray">Offen</span>';
+  if (total <= 2.0) return '<span class="badge badge-info">Empfohlen</span>';
+  if (total <= 3.0) return '<span class="badge badge-warn">Grenzfall</span>';
+  return '<span class="badge badge-danger">Abgelehnt</span>';
+}
+
+// ============================================================
+// DOSSIERS (individuelle Notenübersicht pro Bewerber:in)
+// ============================================================
+function buildDossierHtml(cand) {
+  const agg = aggregateNoten();
+  const a = agg[cand];
+  const sem = document.getElementById('cfg-sem').value;
+  const date = document.getElementById('cfg-date').value;
+  const org = document.getElementById('cfg-org').value;
+
+  // Compute total
+  const vals = [a.intI, a.intII, a.caseI, a.caseII, a.group, a.written].filter(v => v !== null);
+  const total = vals.length ? vals.reduce((x,y)=>x+y,0) / vals.length : null;
+
+  // Gather all observer entries for this candidate, grouped by format
+  // Returns { format: [{observer, scores, mean, veto, notes}, ...] }
+  const byFormat = {};
+  Object.entries(state.helferScores).forEach(([obs, byKey]) => {
+    Object.entries(byKey).forEach(([key, data]) => {
+      const [c, format] = key.split('||');
+      if (c !== cand) return;
+      const hasData = data.scores.some(s => s !== null && s !== undefined && !isNaN(s)) ||
+                      data.veto || (data.notes && data.notes.trim());
+      if (!hasData) return;
+      if (!byFormat[format]) byFormat[format] = [];
+      byFormat[format].push({
+        observer: obs,
+        scores: data.scores,
+        mean: computeObserverFormatMean(data.scores, format),
+        veto: data.veto,
+        notes: data.notes || ''
+      });
+    });
+  });
+
+  const meta = state.candidateMeta[cand] || {};
+  const metaParts = [];
+  if (meta.age) metaParts.push(`${meta.age} Jahre`);
+  if (meta.degree) metaParts.push(meta.degree);
+  if (meta.program) metaParts.push(meta.program);
+  if (meta.semester) metaParts.push(`${meta.semester}. Fachsemester`);
+  const metaLine = metaParts.length ? metaParts.join(' · ') : '';
+
+  let html = `<div class="print-sheet">
+    <div class="print-header">
+      <div>
+        <div class="print-title">Bewerber:innen-Dossier</div>
+        <div class="print-subtitle">${sem} · ${formatDate(date)}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:18px;font-weight:700">${cand}</div>
+        ${metaLine ? `<div style="font-size:13px;color:var(--text);margin-top:2px">${metaLine}</div>` : ''}
+        ${meta.university ? `<div style="font-size:12px;color:var(--text-muted);margin-top:1px">${meta.university}</div>` : ''}
+        <div class="print-subtitle">${org}</div>
+      </div>
+    </div>
+
+    <h4 style="font-size:14px;font-weight:600;margin:0 0 0.8rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em">Gesamtergebnis</h4>
+    <table class="schedule-table">
+      <thead><tr><th>Format</th><th style="width:140px">Note</th><th style="width:100px">Status</th></tr></thead>
+      <tbody>
+        <tr><td>Interview I</td><td>${formatScore(a.intI)}</td><td></td></tr>
+        <tr><td>Interview II</td><td>${formatScore(a.intII)}</td><td></td></tr>
+        <tr><td>Case I</td><td>${formatScore(a.caseI)}</td><td></td></tr>
+        <tr><td>Case II</td><td>${formatScore(a.caseII)}</td><td></td></tr>
+        <tr><td>Gruppendiskussion</td><td>${formatScore(a.group)}</td><td></td></tr>
+        <tr><td>Leistungstest</td><td>${formatScore(a.written)}</td><td></td></tr>
+        <tr style="background:#061430;color:#fff"><td><strong>Gesamt</strong></td><td><strong>${total !== null ? total.toFixed(2) : '–'}</strong></td><td>${statusBadgePlain(total, a.veto)}</td></tr>
+      </tbody>
+    </table>`;
+
+  if (a.veto) {
+    html += `<div class="alert alert-warn" style="margin-top:1rem">⚠ Mindestens ein:e Beobachter:in hat ein Veto eingelegt.</div>`;
+  }
+
+  // Per-format details
+  const formatOrder = ['intI','intII','caseI','caseII','group','written'];
+  formatOrder.forEach(format => {
+    const entries = byFormat[format];
+    if (!entries || !entries.length) return;
+    const criteria = getCriteria(format);
+    const allowsVeto = (format === 'intI' || format === 'intII');
+    html += `<h4 style="margin:1.4rem 0 0.5rem;font-size:14px;font-weight:600;color:${FORMAT_TEXT[format] || '#000'}">${FORMAT_LABELS[format]}</h4>`;
+    html += `<table class="schedule-table" style="font-size:12px"><thead><tr>
+      <th style="width:140px">Beobachter:in</th>`;
+    criteria.forEach(cr => html += `<th>${cr.label}</th>`);
+    if (format === 'caseI' || format === 'caseII') {
+      html += `<th style="width:70px;color:var(--text-muted)">∅ Denken</th>`;
+    }
+    html += `<th style="width:60px">Mittel</th>`;
+    if (allowsVeto) html += `<th style="width:50px">Veto</th>`;
+    html += `<th>Notizen</th></tr></thead><tbody>`;
+
+    entries.forEach(e => {
+      // Compute group-level intermediate means (e.g. Denkvermögen mean for cases)
+      const groupMeans = {};
+      criteria.forEach((cr, i) => {
+        const v = e.scores[i];
+        if (v === null || v === undefined || isNaN(v)) return;
+        const key = cr.group || `__solo${i}`;
+        if (!groupMeans[key]) groupMeans[key] = [];
+        groupMeans[key].push(v);
+      });
+      const denkenMean = groupMeans['denken'] && groupMeans['denken'].length
+        ? groupMeans['denken'].reduce((a,b)=>a+b,0) / groupMeans['denken'].length
+        : null;
+
+      html += `<tr><td><strong>${e.observer}</strong></td>`;
+      criteria.forEach((cr, i) => {
+        const v = e.scores[i];
+        if (v === null || v === undefined || isNaN(v)) {
+          html += '<td style="color:var(--text-faint);text-align:center">–</td>';
+        } else {
+          const isWritten = cr.numericInput;
+          html += `<td style="text-align:center" class="mono">${isWritten ? v.toFixed(2) : v}</td>`;
+        }
+      });
+      // For cases: show Denkvermögen-Zwischenmittel before the overall mean
+      if (format === 'caseI' || format === 'caseII') {
+        html += `<td class="mono" style="text-align:center;color:var(--text-muted);font-size:11px" title="Mittel der 3 Denkvermögen-Fragen">${denkenMean !== null ? '∅ ' + denkenMean.toFixed(2) : '–'}</td>`;
+      }
+      html += `<td class="mono" style="text-align:center;font-weight:600">${e.mean !== null ? e.mean.toFixed(2) : '–'}</td>`;
+      if (allowsVeto) {
+        html += `<td style="text-align:center">${e.veto ? '<span class="badge badge-danger">✕</span>' : '–'}</td>`;
+      }
+      html += `<td style="font-style:italic;color:var(--text)">${e.notes ? escapeHtml(e.notes) : '<span style="color:var(--text-faint);font-style:normal">–</span>'}</td>`;
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  });
+
+  if (Object.keys(byFormat).length === 0) {
+    html += `<p class="text-muted" style="margin-top:1rem">Für diese:n Bewerber:in liegen noch keine Bewertungen vor.</p>`;
+  }
+
+  html += `<p style="margin-top:1.5rem;font-size:11px;color:var(--text-muted);text-align:center">${org}</p></div>`;
+  return html;
+}
+
+function showDossier(cand) {
+  const container = document.getElementById('dossier-container');
+  container.innerHTML = `
+    <div class="card mt-2">
+      <div class="flex justify-between items-center" style="margin-bottom:1rem">
+        <div class="card-title" style="margin:0">Dossier · ${cand}</div>
+        <div class="flex gap-2">
+          <button class="btn btn-secondary btn-sm" onclick="printDossier()">🖨 Drucken</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('dossier-container').innerHTML=''">✕ Schließen</button>
+        </div>
+      </div>
+      ${buildDossierHtml(cand)}
+    </div>
+  `;
+  // Scroll into view
+  container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderAllDossiers() {
+  const container = document.getElementById('dossier-container');
+  let html = `
+    <div class="card mt-2">
+      <div class="flex justify-between items-center" style="margin-bottom:1rem">
+        <div class="card-title" style="margin:0">Alle Dossiers (${state.candidates.length})</div>
+        <div class="flex gap-2">
+          <button class="btn btn-secondary btn-sm" onclick="printDossier()">🖨 Alle drucken</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('dossier-container').innerHTML=''">✕ Schließen</button>
+        </div>
+      </div>`;
+  state.candidates.forEach(cand => {
+    html += buildDossierHtml(cand);
+  });
+  html += '</div>';
+  container.innerHTML = html;
+  container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function printDossier() {
+  document.body.classList.add('printing-dossier');
+  window.print();
+  // Remove class shortly after print dialog closes
+  setTimeout(() => document.body.classList.remove('printing-dossier'), 500);
+}
+
+function formatScore(val) {
+  if (val === null || val === undefined) return '<span class="text-faint">–</span>';
+  return `<span class="mono">${val.toFixed(2)}</span>`;
+}
+
+function statusBadgePlain(total, veto) {
+  if (veto) return '<span class="badge badge-danger">Veto</span>';
+  if (total === null) return '<span class="badge badge-gray">Offen</span>';
+  if (total <= 2.0) return '<span class="badge badge-info">Empfohlen</span>';
+  if (total <= 3.0) return '<span class="badge badge-warn">Grenzfall</span>';
+  return '<span class="badge badge-danger">Abgelehnt</span>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+
+// ============================================================
+// CSV
+// ============================================================
+function exportCSV() {
+  const agg = aggregateNoten();
+  const rows = [['Name','Alter','Abschluss','Studiengang','Universität','Fachsemester','Interview I','Interview II','Case I','Case II','Gruppe','Leistungstest','Veto','Gesamt']];
+  state.candidates.forEach(cand => {
+    const a = agg[cand];
+    const meta = state.candidateMeta[cand] || {};
+    const vals = [a.intI, a.intII, a.caseI, a.caseII, a.group, a.written].filter(v => v !== null);
+    const total = vals.length ? vals.reduce((x,y)=>x+y,0) / vals.length : null;
+    rows.push([
+      cand,
+      meta.age || '',
+      meta.degree || '',
+      meta.program || '',
+      meta.university || '',
+      meta.semester || '',
+      a.intI?.toFixed(2) ?? '',
+      a.intII?.toFixed(2) ?? '',
+      a.caseI?.toFixed(2) ?? '',
+      a.caseII?.toFixed(2) ?? '',
+      a.group?.toFixed(2) ?? '',
+      a.written?.toFixed(2) ?? '',
+      a.veto ? 'Ja' : 'Nein',
+      total !== null ? total.toFixed(2) : '',
+    ]);
+  });
+  const csv = rows.map(r => r.map(c => /[;"\n]/.test(String(c)) ? '"' + String(c).replace(/"/g,'""') + '"' : c).join(';')).join('\n');
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'assessment_day_noten.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+function formatDate(d) {
+  if (!d) return '';
+  const parts = d.split('-');
+  if (parts.length !== 3) return d;
+  return `${parts[2]}.${parts[1]}.${parts[0]}`;
+}
+
+// ============================================================
+// DEMO
+// ============================================================
+function loadDemo() {
+  state.candidates = [
+    'Anna Müller','Ben Schmidt','Carla Fischer','David Weber',
+    'Emma Meyer','Felix Wagner','Greta Becker','Hannes Schulz',
+    'Ida Hoffmann','Jonas Schäfer','Klara Koch','Leon Richter',
+    'Mia Bauer','Noah Klein','Olivia Wolf','Paul Neumann',
+    'Quirin Schwarz','Rosa Zimmermann','Stefan Braun','Tina Krüger',
+    'Uwe Hofmann','Vera Hartmann','Walter Lange','Xenia Werner'
+  ];
+  // Generate plausible meta data (age, degree, program, university, semester)
+  const programs = [
+    'BWL', 'International Business', 'Wirtschaftsingenieurwesen',
+    'Informatik', 'Wirtschaftsinformatik', 'Maschinenbau',
+    'Volkswirtschaftslehre', 'Wirtschaftspädagogik', 'IBS',
+    'Data Science', 'Wirtschaftsrecht', 'Psychologie'
+  ];
+  const universities = [
+    'FAU Erlangen-Nürnberg', 'TU München', 'LMU München', 'Uni Bayreuth',
+    'Uni Würzburg', 'Uni Regensburg'
+  ];
+  const degrees = ['Bachelor', 'Master', 'Bachelor', 'Master', 'Bachelor', 'Promotion'];
+  state.candidateMeta = {};
+  state.candidates.forEach((name, i) => {
+    state.candidateMeta[name] = {
+      age: String(19 + (i % 8)),
+      degree: degrees[i % degrees.length],
+      program: programs[i % programs.length],
+      university: universities[i % universities.length],
+      semester: String(1 + (i % 7)),
+    };
+  });
+  // 12 Interview observers: 6 fixed + 6 rotating
+  state.interviewersFixed = [
+    'Andreas Berger','Beate Frank','Claudia Roth','Dieter Vogel','Eva Lehmann','Frank Schuster'
+  ];
+  state.interviewersRotating = [
+    'Gabi Otto','Hans Pohl','Ines Reuter','Jens Sauer','Karin Thiel','Lars Uhl'
+  ];
+  // 12 Case observers: 6 fixed + 6 rotating
+  state.caseObserversFixed = [
+    'Manuela Vogt','Norbert Walter','Olaf Arndt','Petra Busch','Ralf Conrad','Sabine Dietrich'
+  ];
+  state.caseObserversRotating = [
+    'Tobias Engel','Ulrike Förster','Volker Grimm','Wiebke Haas','Xaver Ihle','Yvonne Jansen'
+  ];
+  // 6 Group observers
+  state.groupObservers = [
+    'Achim Kuhn','Bettina Lutz','Christoph Maier','Doris Nagel','Erwin Oppermann','Frieda Peters'
+  ];
+  // 1 Written supervisor
+  state.writtenSupervisors = ['Gerhard Quast'];
+
+  state.wkw = {};
+
+  ['candidates','interviewersFixed','interviewersRotating','caseObserversFixed','caseObserversRotating','groupObservers','writtenSupervisors'].forEach(list => renderPersonList(list));
+  updateCounts();
+  updateWkwTable();
+  // Generate rotation in the background so other tabs are populated,
+  // but stay on the Setup tab.
+  generateRotation(false, false);
+}
+
+// ============================================================
+// SETUP / ROTATION PASSWORD LOCK
+// ============================================================
+// Note: this is a soft lock to prevent accidental edits by observers
+// who shouldn't touch setup. It's NOT a real security boundary —
+// the password is visible in this file's source.
+const SETUP_PASSWORD = 'HalloJCT';
+
+function checkSetupPassword() {
+  const input = document.getElementById('setup-pwd');
+  const errorEl = document.getElementById('setup-lock-error');
+  if (input.value === SETUP_PASSWORD) {
+    unlockSetup();
+    errorEl.textContent = '';
+    input.value = '';
+  } else {
+    errorEl.textContent = 'Falsches Passwort.';
+    input.value = '';
+    input.focus();
+  }
+}
+
+function unlockSetup() {
+  document.getElementById('setup-lock').style.display = 'none';
+  document.getElementById('setup-content').style.display = '';
+}
+
+function lockSetup() {
+  document.getElementById('setup-lock').style.display = '';
+  document.getElementById('setup-content').style.display = 'none';
+}
+
+function checkRotationPassword() {
+  const input = document.getElementById('rotation-pwd');
+  const errorEl = document.getElementById('rotation-lock-error');
+  if (input.value === SETUP_PASSWORD) {
+    unlockRotation();
+    errorEl.textContent = '';
+    input.value = '';
+  } else {
+    errorEl.textContent = 'Falsches Passwort.';
+    input.value = '';
+    input.focus();
+  }
+}
+
+function unlockRotation() {
+  document.getElementById('rotation-lock').style.display = 'none';
+  document.getElementById('rotation-content-wrapper').style.display = '';
+}
+
+function lockRotation() {
+  document.getElementById('rotation-lock').style.display = '';
+  document.getElementById('rotation-content-wrapper').style.display = 'none';
+}
+
+// ============================================================
+// RESET ALL DATA (separate password)
+// ============================================================
+const RESET_PASSWORD = 'JCT1990';
+
+function openResetModal() {
+  document.getElementById('reset-modal').style.display = '';
+  document.getElementById('reset-error').textContent = '';
+  document.getElementById('reset-pwd').value = '';
+  setTimeout(() => document.getElementById('reset-pwd').focus(), 100);
+}
+
+function closeResetModal() {
+  document.getElementById('reset-modal').style.display = 'none';
+  document.getElementById('reset-pwd').value = '';
+  document.getElementById('reset-error').textContent = '';
+}
+
+function confirmReset() {
+  const input = document.getElementById('reset-pwd');
+  const errorEl = document.getElementById('reset-error');
+  if (input.value !== RESET_PASSWORD) {
+    errorEl.textContent = 'Falsches Passwort.';
+    input.value = '';
+    input.focus();
+    return;
+  }
+  resetAllData();
+  closeResetModal();
+}
+
+function resetAllData() {
+  // Wipe state
+  state.candidates = [];
+  state.candidateMeta = {};
+  state.interviewersFixed = [];
+  state.interviewersRotating = [];
+  state.caseObserversFixed = [];
+  state.caseObserversRotating = [];
+  state.groupObservers = [];
+  state.writtenSupervisors = [];
+  state.wkw = {};
+  state.rotation = null;
+  state.helferScores = {};
+
+  // Re-render lists
+  ['candidates','interviewersFixed','interviewersRotating','caseObserversFixed','caseObserversRotating','groupObservers','writtenSupervisors'].forEach(list => renderPersonList(list));
+  updateCounts();
+  updateWkwTable();
+
+  // Reset displays in other tabs
+  document.getElementById('rotation-content').innerHTML = '<div class="empty-state"><div class="icon">📋</div>Noch kein Rotationsplan. Gehe zu Setup und klicke "Rotation generieren".</div>';
+  document.getElementById('rotation-stats').innerHTML = '';
+  document.getElementById('rotation-alerts').innerHTML = '';
+  document.getElementById('teilnehmer-content').innerHTML = '<div class="empty-state"><div class="icon">📄</div>Zuerst Rotation generieren.</div>';
+  document.getElementById('helfer-tabs').innerHTML = '';
+  document.getElementById('helfer-content').innerHTML = '<div class="empty-state"><div class="icon">📝</div>Zuerst Rotation generieren.</div>';
+  document.getElementById('noten-tbody').innerHTML = '';
+  document.getElementById('noten-stats').innerHTML = '';
+  document.getElementById('dossier-container').innerHTML = '';
+
+  // Push empty state to Firebase and wipe all helferScores docs
+  pushSetup();
+  wipeAllHelferScoresInFirebase();
+}
+
+async function wipeAllHelferScoresInFirebase() {
+  if (!sync.enabled || !sync.ready) return;
+  try {
+    const { db, collection, getDoc, deleteDoc, doc, onSnapshot } = window.__firebase;
+    // Read current docs and delete each (no listAll without admin SDK,
+    // but we know the observer names from the local lists, which are now empty —
+    // so we use a one-shot fetch via the existing collection snapshot path)
+    const colRef = collection(db, 'events', EVENT_ID, 'helferScores');
+    // Use a one-time subscription
+    const unsub = onSnapshot(colRef, async snap => {
+      unsub();
+      for (const d of snap.docs) {
+        try { await deleteDoc(doc(db, 'events', EVENT_ID, 'helferScores', d.id)); } catch (e) {}
+      }
+    });
+  } catch (err) {
+    console.error('Wipe scores failed:', err);
+  }
+}
+
+// ============================================================
+// INIT
+// ============================================================
+updateCounts();
+
+(async () => {
+  // Try Firebase init. If config is missing, work in local-only mode.
+  const ok = await firebaseInit();
+  if (!ok) {
+    // Local mode: skip login, allow direct use. Show a hint on the setup lock.
+    setSyncStatus('local', 'Lokal (kein Firebase)');
+    document.getElementById('login-overlay').style.display = 'none';
+    return;
+  }
+  // Online: show login
+  showLoginOverlay();
+})();
+</script>
+</body>
+</html>
