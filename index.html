@@ -1134,6 +1134,18 @@ tr:hover td { background: #faf9f7; }
 
 <!-- ============================================================ TEILNEHMERSHEETS ============================================================ -->
 <div id="view-teilnehmer" class="view">
+
+  <!-- Lock for observers -->
+  <div id="teilnehmer-lock" class="setup-lock" style="display:none">
+    <div class="setup-lock-card">
+      <div class="setup-lock-icon">🔒</div>
+      <h2>Teilnehmersheets geschützt</h2>
+      <p>Die Übersicht der Teilnehmersheets ist nur für Organisator:innen sichtbar. Dein Bewertungsbogen befindet sich in <strong>Helfersheets</strong>.</p>
+      <button class="btn btn-secondary btn-sm" onclick="showViewById('helfer')">Zu meinem Helfersheet</button>
+    </div>
+  </div>
+
+  <div id="teilnehmer-content-wrapper">
   <div class="section-header">
     <div>
       <div class="section-title">Teilnehmersheets</div>
@@ -1143,6 +1155,7 @@ tr:hover td { background: #faf9f7; }
   </div>
   <div id="teilnehmer-content">
     <div class="empty-state"><div class="icon">📄</div>Zuerst Rotation generieren.</div>
+  </div>
   </div>
 </div>
 
@@ -1164,6 +1177,18 @@ tr:hover td { background: #faf9f7; }
 
 <!-- ============================================================ NOTEN ============================================================ -->
 <div id="view-noten" class="view">
+
+  <!-- Lock for observers -->
+  <div id="noten-lock" class="setup-lock" style="display:none">
+    <div class="setup-lock-card">
+      <div class="setup-lock-icon">🔒</div>
+      <h2>Noten geschützt</h2>
+      <p>Die Notenübersicht ist nur für Organisator:innen sichtbar. Trage deine Bewertungen in <strong>Helfersheets</strong> ein.</p>
+      <button class="btn btn-secondary btn-sm" onclick="showViewById('helfer')">Zu meinem Helfersheet</button>
+    </div>
+  </div>
+
+  <div id="noten-content-wrapper">
   <div class="section-header">
     <div>
       <div class="section-title">Notenerfassung & Auswertung</div>
@@ -1205,6 +1230,7 @@ tr:hover td { background: #faf9f7; }
   </div>
 
   <div id="dossier-container"></div>
+  </div><!-- /noten-content-wrapper -->
 </div>
 
 <!-- ============================================================ RESET MODAL ============================================================ -->
@@ -1397,6 +1423,7 @@ async function firebaseSubscribe() {
   const unsubScores = onSnapshot(scoresRef, snap => {
     sync.applyingRemote = true;
     try {
+      console.log('[scoresListener] received', snap.docChanges().length, 'changes');
       snap.docChanges().forEach(change => {
         const obsName = change.doc.id;
         if (change.type === 'removed') {
@@ -1502,18 +1529,28 @@ function applyRemoteSetup(data) {
 // Push setup changes (debounced) to Firestore. Only org users should call this.
 let setupPushTimer = null;
 function pushSetup() {
-  if (!sync.enabled || !sync.ready || sync.applyingRemote) return;
-  if (sync.identity !== 'org') return;  // observers cannot push setup
-  // Critical safety check: don't push until we've received the first snapshot,
-  // otherwise we'd overwrite remote data with our empty local state.
-  if (!sync.firstSyncDone) return;
+  if (!sync.enabled || !sync.ready || sync.applyingRemote) {
+    console.log('[pushSetup] skipped:', { enabled: sync.enabled, ready: sync.ready, applyingRemote: sync.applyingRemote });
+    return;
+  }
+  if (sync.identity !== 'org') {
+    console.log('[pushSetup] skipped: not org, identity =', sync.identity);
+    return;
+  }
+  if (!sync.firstSyncDone) {
+    console.log('[pushSetup] skipped: firstSyncDone still false');
+    return;
+  }
   clearTimeout(setupPushTimer);
   setupPushTimer = setTimeout(async () => {
     try {
       const { db, doc, setDoc } = window.__firebase;
-      await setDoc(doc(db, 'events', EVENT_ID, 'meta', 'setup'), serializeSetup());
+      const payload = serializeSetup();
+      console.log('[pushSetup] writing to Firestore, candidates=', payload.candidates?.length, 'rotationJson?', !!payload.rotationJson);
+      await setDoc(doc(db, 'events', EVENT_ID, 'meta', 'setup'), payload);
+      console.log('[pushSetup] write SUCCESS');
     } catch (err) {
-      console.error('Setup push failed:', err);
+      console.error('[pushSetup] write FAILED:', err);
       setSyncStatus('offline', 'Schreibfehler');
     }
   }, 400);
@@ -1521,24 +1558,34 @@ function pushSetup() {
 
 // Push helferScores for one observer (debounced per observer)
 function pushHelferScores(observerName) {
-  if (!sync.enabled || !sync.ready || sync.applyingRemote) return;
-  if (!sync.firstSyncDone) return;
-  // Only org or the observer themselves may write to their scores doc
-  if (sync.identity !== 'org' && sync.identity !== 'observer:' + observerName) return;
+  if (!sync.enabled || !sync.ready || sync.applyingRemote) {
+    console.log('[pushScores] skipped:', observerName, { enabled: sync.enabled, ready: sync.ready, applyingRemote: sync.applyingRemote });
+    return;
+  }
+  if (!sync.firstSyncDone) {
+    console.log('[pushScores] skipped: firstSyncDone still false');
+    return;
+  }
+  if (sync.identity !== 'org' && sync.identity !== 'observer:' + observerName) {
+    console.log('[pushScores] skipped: identity mismatch. identity=', sync.identity, 'observerName=', observerName);
+    return;
+  }
   clearTimeout(sync.pendingTimers[observerName]);
   sync.pendingTimers[observerName] = setTimeout(async () => {
     try {
       const { db, doc, setDoc } = window.__firebase;
-      // Serialize scores as JSON to avoid any nested-array issues
+      const data = state.helferScores[observerName] || {};
+      console.log('[pushScores] writing for', observerName, 'numKeys=', Object.keys(data).length);
       await setDoc(
         doc(db, 'events', EVENT_ID, 'helferScores', observerName),
         {
-          scoresJson: JSON.stringify(state.helferScores[observerName] || {}),
+          scoresJson: JSON.stringify(data),
           updatedAt: window.__firebase.serverTimestamp(),
         }
       );
+      console.log('[pushScores] write SUCCESS for', observerName);
     } catch (err) {
-      console.error('Score push failed for ' + observerName + ':', err);
+      console.error('[pushScores] write FAILED for', observerName, ':', err);
       setSyncStatus('offline', 'Schreibfehler');
     }
   }, 300);
@@ -1628,9 +1675,13 @@ function finalizeLogin() {
     userTag.style.display = '';
     userName.textContent = 'Organisator:in';
     userRole.textContent = 'Org';
-    // Auto-unlock setup & rotation since they have the password anyway
+    // Org sees everything
     unlockSetup();
     unlockRotation();
+    unlockTeilnehmer();
+    unlockNoten();
+    // Re-render helfersheets so all observers' tabs appear
+    if (state.rotation) renderHelfersheets();
     // Default landing: setup
     showViewById('setup');
   } else if (sync.identity?.startsWith('observer:')) {
@@ -1638,27 +1689,50 @@ function finalizeLogin() {
     userTag.style.display = '';
     userName.textContent = name;
     userRole.textContent = 'Beobachter:in';
-    // Observers can only access helfersheets, teilnehmersheets and view of noten
-    // Setup and rotation remain locked. Send them straight to helfersheets.
+    // Observers only see their own helfersheet. Everything else is locked.
+    lockSetup();
+    lockRotation();
+    lockTeilnehmer();
+    lockNoten();
+    // Re-render helfersheets so only the own sheet is shown
+    if (state.rotation) renderHelfersheets();
     showViewById('helfer');
-    // Auto-select their own helfersheet tab
-    setTimeout(() => {
-      const tabs = document.querySelectorAll('#helfer-tabs .inner-tab');
-      tabs.forEach((t, i) => {
-        if (t.textContent.trim() === name) {
-          switchHelferTab(i);
-        }
-      });
-    }, 200);
   }
+}
+
+function unlockTeilnehmer() {
+  const lock = document.getElementById('teilnehmer-lock');
+  const content = document.getElementById('teilnehmer-content-wrapper');
+  if (lock) lock.style.display = 'none';
+  if (content) content.style.display = '';
+}
+function lockTeilnehmer() {
+  const lock = document.getElementById('teilnehmer-lock');
+  const content = document.getElementById('teilnehmer-content-wrapper');
+  if (lock) lock.style.display = '';
+  if (content) content.style.display = 'none';
+}
+function unlockNoten() {
+  const lock = document.getElementById('noten-lock');
+  const content = document.getElementById('noten-content-wrapper');
+  if (lock) lock.style.display = 'none';
+  if (content) content.style.display = '';
+}
+function lockNoten() {
+  const lock = document.getElementById('noten-lock');
+  const content = document.getElementById('noten-content-wrapper');
+  if (lock) lock.style.display = '';
+  if (content) content.style.display = 'none';
 }
 
 function logout() {
   sync.identity = null;
   document.getElementById('user-tag').style.display = 'none';
-  // Re-lock setup/rotation
+  // Re-lock everything
   lockSetup();
   lockRotation();
+  lockTeilnehmer();
+  lockNoten();
   showLoginOverlay();
 }
 
@@ -2740,7 +2814,12 @@ function renderTeilnehmersheets() {
 function renderHelfersheets() {
   if (!state.rotation) return;
 
-  const allObs = Object.keys(state.rotation.observerSchedule);
+  let allObs = Object.keys(state.rotation.observerSchedule);
+  // Observers may only see their own sheet
+  if (sync.identity && sync.identity.startsWith('observer:')) {
+    const myName = sync.identity.slice('observer:'.length);
+    allObs = allObs.filter(o => o === myName);
+  }
   const tabsEl = document.getElementById('helfer-tabs');
   const contentEl = document.getElementById('helfer-content');
 
@@ -2750,7 +2829,12 @@ function renderHelfersheets() {
     return;
   }
 
-  tabsEl.innerHTML = allObs.map((o, i) => `<button class="inner-tab ${i===0?'active':''}" onclick="switchHelferTab(${i})">${o}</button>`).join('');
+  // Hide tab bar entirely when only one sheet is visible (observers)
+  if (allObs.length === 1) {
+    tabsEl.innerHTML = '';
+  } else {
+    tabsEl.innerHTML = allObs.map((o, i) => `<button class="inner-tab ${i===0?'active':''}" onclick="switchHelferTab(${i})">${o}</button>`).join('');
+  }
 
   const sem = document.getElementById('cfg-sem').value;
   const date = document.getElementById('cfg-date').value;
