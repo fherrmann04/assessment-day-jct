@@ -1671,6 +1671,7 @@ function finalizeLogin() {
   const userTag = document.getElementById('user-tag');
   const userName = document.getElementById('user-name');
   const userRole = document.getElementById('user-role');
+  const navTabs = document.querySelector('.nav-tabs');
   if (sync.identity === 'org') {
     userTag.style.display = '';
     userName.textContent = 'Organisator:in';
@@ -1680,13 +1681,16 @@ function finalizeLogin() {
     unlockRotation();
     unlockTeilnehmer();
     unlockNoten();
-    // Show all nav tabs
+    // Show the entire nav tab bar
+    if (navTabs) navTabs.style.display = '';
+    // Show all individual nav tabs (in case observer-login hid some)
     ['nav-setup','nav-rotation','nav-teilnehmer','nav-helfer','nav-noten'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = '';
     });
     // Restore default Helfersheets label
-    document.getElementById('nav-helfer').textContent = '④ Helfersheets';
+    const helferTab = document.getElementById('nav-helfer');
+    if (helferTab) helferTab.textContent = '④ Helfersheets';
     // Re-render helfersheets so all observers' tabs appear
     if (state.rotation) renderHelfersheets();
     // Default landing: setup
@@ -1696,21 +1700,14 @@ function finalizeLogin() {
     userTag.style.display = '';
     userName.textContent = name;
     userRole.textContent = 'Beobachter:in';
-    // Observers only see their own helfersheet. Everything else is locked.
+    // Observers only see their own helfersheet. Lock everything else
+    // (lock state still matters in case the user tries to navigate via URL).
     lockSetup();
     lockRotation();
     lockTeilnehmer();
     lockNoten();
-    // Hide all nav tabs except Helfersheets, rename it for clarity
-    ['nav-setup','nav-rotation','nav-teilnehmer','nav-noten'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.style.display = 'none';
-    });
-    const helferTab = document.getElementById('nav-helfer');
-    if (helferTab) {
-      helferTab.style.display = '';
-      helferTab.textContent = 'Mein Bewertungsbogen';
-    }
+    // Hide the entire nav tab bar — observers have just one view
+    if (navTabs) navTabs.style.display = 'none';
     // Re-render helfersheets so only the own sheet is shown
     if (state.rotation) renderHelfersheets();
     showViewById('helfer');
@@ -1750,7 +1747,9 @@ function logout() {
   lockRotation();
   lockTeilnehmer();
   lockNoten();
-  // Restore all nav tabs for the next user (they were hidden when an observer logged in)
+  // Restore the entire nav tab bar + all individual tabs for the next user
+  const navTabs = document.querySelector('.nav-tabs');
+  if (navTabs) navTabs.style.display = '';
   ['nav-setup','nav-rotation','nav-teilnehmer','nav-helfer','nav-noten'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = '';
