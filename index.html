@@ -950,11 +950,11 @@ tr:hover td { background: #faf9f7; }
     <span style="cursor:pointer;opacity:0.6;margin-left:4px" onclick="logout()" title="Abmelden">×</span>
   </span>
   <nav class="nav-tabs">
-    <button class="nav-tab active" onclick="showView('setup', event)">① Setup</button>
-    <button class="nav-tab" onclick="showView('rotation', event)">② Rotation</button>
-    <button class="nav-tab" onclick="showView('teilnehmer', event)">③ Teilnehmersheets</button>
-    <button class="nav-tab" onclick="showView('helfer', event)">④ Helfersheets</button>
-    <button class="nav-tab" onclick="showView('noten', event)">⑤ Noten</button>
+    <button class="nav-tab active" id="nav-setup" onclick="showView('setup', event)">① Setup</button>
+    <button class="nav-tab" id="nav-rotation" onclick="showView('rotation', event)">② Rotation</button>
+    <button class="nav-tab" id="nav-teilnehmer" onclick="showView('teilnehmer', event)">③ Teilnehmersheets</button>
+    <button class="nav-tab" id="nav-helfer" onclick="showView('helfer', event)">④ Helfersheets</button>
+    <button class="nav-tab" id="nav-noten" onclick="showView('noten', event)">⑤ Noten</button>
   </nav>
 </header>
 
@@ -1680,6 +1680,13 @@ function finalizeLogin() {
     unlockRotation();
     unlockTeilnehmer();
     unlockNoten();
+    // Show all nav tabs
+    ['nav-setup','nav-rotation','nav-teilnehmer','nav-helfer','nav-noten'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = '';
+    });
+    // Restore default Helfersheets label
+    document.getElementById('nav-helfer').textContent = '④ Helfersheets';
     // Re-render helfersheets so all observers' tabs appear
     if (state.rotation) renderHelfersheets();
     // Default landing: setup
@@ -1694,6 +1701,16 @@ function finalizeLogin() {
     lockRotation();
     lockTeilnehmer();
     lockNoten();
+    // Hide all nav tabs except Helfersheets, rename it for clarity
+    ['nav-setup','nav-rotation','nav-teilnehmer','nav-noten'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    });
+    const helferTab = document.getElementById('nav-helfer');
+    if (helferTab) {
+      helferTab.style.display = '';
+      helferTab.textContent = 'Mein Bewertungsbogen';
+    }
     // Re-render helfersheets so only the own sheet is shown
     if (state.rotation) renderHelfersheets();
     showViewById('helfer');
@@ -1733,6 +1750,13 @@ function logout() {
   lockRotation();
   lockTeilnehmer();
   lockNoten();
+  // Restore all nav tabs for the next user (they were hidden when an observer logged in)
+  ['nav-setup','nav-rotation','nav-teilnehmer','nav-helfer','nav-noten'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = '';
+  });
+  const helferTab = document.getElementById('nav-helfer');
+  if (helferTab) helferTab.textContent = '④ Helfersheets';
   showLoginOverlay();
 }
 
