@@ -97,17 +97,20 @@
     getFirestore, doc, setDoc, getDoc, onSnapshot, collection, deleteDoc,
     enableIndexedDbPersistence, serverTimestamp
   } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+  import {
+    getAuth, signInAnonymously, onAuthStateChanged
+  } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js';
 
-  // ===== EDIT THIS CONFIG WITH YOUR FIREBASE PROJECT VALUES =====
+  // ===== FIREBASE CONFIG =====
   const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT.firebaseapp.com",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_PROJECT.appspot.com",
-    messagingSenderId: "000000000000",
-    appId: "1:000000000000:web:abcdef123456"
+    apiKey: "AIzaSyBIHDhz00LCBTQnFitfylE--yi1GRFLo_k",
+    authDomain: "jct-assessment-day.firebaseapp.com",
+    projectId: "jct-assessment-day",
+    storageBucket: "jct-assessment-day.firebasestorage.app",
+    messagingSenderId: "308600733717",
+    appId: "1:308600733717:web:be165ebff66e71e3bd8e1c"
   };
-  // ==============================================================
+  // ============================
 
   // Detect whether the config has been customized
   const configReady = firebaseConfig.projectId && firebaseConfig.projectId !== 'YOUR_PROJECT_ID';
@@ -119,10 +122,12 @@
     try {
       const app = initializeApp(firebaseConfig);
       const db = getFirestore(app);
+      const auth = getAuth(app);
       // Enable offline cache so the app keeps working briefly if the network drops
       enableIndexedDbPersistence(db).catch(() => {});
       window.__firebase.app = app;
       window.__firebase.db = db;
+      window.__firebase.auth = auth;
       window.__firebase.doc = doc;
       window.__firebase.setDoc = setDoc;
       window.__firebase.getDoc = getDoc;
@@ -130,7 +135,20 @@
       window.__firebase.collection = collection;
       window.__firebase.deleteDoc = deleteDoc;
       window.__firebase.serverTimestamp = serverTimestamp;
-      window.dispatchEvent(new Event('firebase-ready'));
+
+      // Sign in anonymously so Firestore Security Rules (request.auth != null) pass.
+      // Wait for the auth state to be confirmed before firing the ready event.
+      onAuthStateChanged(auth, user => {
+        if (user) {
+          window.__firebase.user = user;
+          window.dispatchEvent(new Event('firebase-ready'));
+        }
+      });
+      signInAnonymously(auth).catch(err => {
+        console.error('Anonymous sign-in failed:', err);
+        window.__firebase.error = 'Anmeldung fehlgeschlagen: ' + err.message;
+        window.dispatchEvent(new Event('firebase-error'));
+      });
     } catch (err) {
       console.error('Firebase init failed:', err);
       window.__firebase.error = err.message;
