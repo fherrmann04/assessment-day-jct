@@ -547,6 +547,74 @@ tr:hover td { background: #faf9f7; }
 .criteria-table th { background: #faf9f7; }
 .criteria-table td { vertical-align: top; padding: 8px; }
 
+/* Score row gets a top border to visually separate candidates */
+.criteria-table tr.score-row > td {
+  border-top: 2px solid var(--border);
+  padding-top: 12px;
+}
+.criteria-table tr.reason-row > td {
+  padding: 0 8px 4px;
+  background: #fafbfc;
+}
+.criteria-table tr.reason-row .reason-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+  vertical-align: top;
+  padding-top: 6px;
+}
+.reason-input {
+  width: 100%;
+  min-width: 110px;
+  padding: 4px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+  font-family: inherit;
+  resize: vertical;
+  color: var(--text);
+}
+.reason-input:focus { outline: none; border-color: var(--accent-mid); }
+
+/* Notes row: full-width single line below each candidate block */
+.criteria-table tr.notes-row > td.notes-cell {
+  padding: 4px 8px 12px;
+  background: #fafbfc;
+  border-bottom: 1px dashed var(--border);
+}
+.notes-input-wide {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+  font-family: inherit;
+  resize: vertical;
+  color: var(--text);
+}
+.notes-input-wide:focus { outline: none; border-color: var(--accent-mid); }
+
+/* Horizontal scroll wrapper for criteria tables on narrow screens */
+.criteria-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: 0.5rem;
+  /* Subtle right-side fade hint when content overflows */
+  background:
+    linear-gradient(to right, #fff 30%, rgba(255,255,255,0)) left center / 20px 100% no-repeat,
+    linear-gradient(to left, #fff 30%, rgba(255,255,255,0)) right center / 20px 100% no-repeat,
+    radial-gradient(farthest-side at 0 50%, rgba(0,0,0,0.10), rgba(0,0,0,0)) left center / 14px 100% no-repeat,
+    radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,0.10), rgba(0,0,0,0)) right center / 14px 100% no-repeat;
+  background-attachment: local, local, scroll, scroll;
+}
+.criteria-table-scroll > table {
+  min-width: 900px;  /* forces horizontal scroll on narrow screens */
+}
+
 /* INNER TABS */
 .inner-tabs {
   display: flex;
@@ -2442,7 +2510,7 @@ function initHelferScoresFromRotation() {
       const key = candidate + '||' + format;
       if (!state.helferScores[obs][key]) {
         const crit = getCriteria(format);
-        state.helferScores[obs][key] = { scores: crit.map(() => null), veto: false, notes: '' };
+        state.helferScores[obs][key] = { scores: crit.map(() => null), veto: false, notes: '', reasons: crit.map(() => '') };
       }
     });
   });
@@ -2897,12 +2965,12 @@ function renderHelfersheets() {
       const allowsVeto = (format === 'intI' || format === 'intII');
       const hasZeitJct = (format === 'intII');
       html += `<h4 style="margin:1.2rem 0 0.5rem;font-size:14px;font-weight:600;color:${FORMAT_TEXT[format] || '#000'}">${FORMAT_LABELS[format] || format}</h4>`;
-      html += `<table class="criteria-table">
+      html += `<div class="criteria-table-scroll"><table class="criteria-table">
         <thead><tr><th style="width:140px">Bewerber:in</th>`;
       criteria.forEach(c => html += `<th>${c.label}</th>`);
       if (hasZeitJct) html += `<th style="width:90px">Zeit für JCT (h)</th>`;
       if (allowsVeto) html += `<th style="width:50px">Veto</th>`;
-      html += `<th>Notizen</th><th style="width:60px">Slot/Raum</th></tr></thead><tbody>`;
+      html += `<th style="width:60px">Slot/Raum</th></tr></thead><tbody>`;
 
       byFormat[format].forEach(entry => {
         const cand = entry.candidate;
@@ -2910,24 +2978,30 @@ function renderHelfersheets() {
         // Ensure the observer's score map exists (might not be loaded yet from Firestore)
         if (!state.helferScores[obs]) state.helferScores[obs] = {};
         if (!state.helferScores[obs][key]) {
-          state.helferScores[obs][key] = { scores: criteria.map(() => null), veto: false, notes: '' };
+          state.helferScores[obs][key] = { scores: criteria.map(() => null), veto: false, notes: '', reasons: criteria.map(() => '') };
         }
         const data = state.helferScores[obs][key];
+        // Ensure reasons array exists and matches criteria length
+        if (!Array.isArray(data.reasons)) data.reasons = criteria.map(() => '');
+        while (data.reasons.length < criteria.length) data.reasons.push('');
         const wkwConflict = state.wkw[obs] && state.wkw[obs].has(cand);
-        html += `<tr ${wkwConflict ? 'style="background:#fde8e6"' : ''}><td><strong>${cand}</strong>${wkwConflict ? ' <span class="badge badge-danger">wkw</span>' : ''}</td>`;
+        const safeObs = obs.replace(/'/g,"\\'");
+        const safeCand = cand.replace(/'/g,"\\'");
+
+        // ---- Row 1: scores + zeit + veto + slot ----
+        html += `<tr ${wkwConflict ? 'style="background:#fde8e6"' : ''} class="score-row"><td><strong>${cand}</strong>${wkwConflict ? ' <span class="badge badge-danger">wkw</span>' : ''}</td>`;
         criteria.forEach((cr, crIdx) => {
           const v = data.scores[crIdx];
           if (cr.numericInput) {
-            // Numeric input for written test (decimal grade)
             const inputVal = (v !== null && v !== undefined) ? v : '';
             html += `<td><input type="number" class="numeric-grade" min="1" max="5" step="0.01" placeholder="z.B. 1.75" value="${inputVal}"
-              oninput="setHelferNumericScore('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',${crIdx},this.value)"
+              oninput="setHelferNumericScore('${safeObs}','${safeCand}','${format}',${crIdx},this.value)"
               style="width:90px;padding:6px 8px;text-align:center;font-family:'DM Mono',monospace"></td>`;
           } else {
             html += '<td><div class="score-boxes">';
             [1,2,3,4,5].forEach(n => {
               const sel = v === n ? `selected-${n}` : '';
-              html += `<button class="score-btn ${sel}" onclick="setHelferScore('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',${crIdx},${n},this)">${n}</button>`;
+              html += `<button class="score-btn ${sel}" onclick="setHelferScore('${safeObs}','${safeCand}','${format}',${crIdx},${n},this)">${n}</button>`;
             });
             html += '</div></td>';
           }
@@ -2936,21 +3010,42 @@ function renderHelfersheets() {
           const zeit = (data.zeitJct !== null && data.zeitJct !== undefined) ? data.zeitJct : '';
           html += `<td><input type="number" min="0" max="200" step="0.5" placeholder="z.B. 5"
             value="${zeit}"
-            oninput="setHelferZeitJct('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',this.value)"
+            oninput="setHelferZeitJct('${safeObs}','${safeCand}','${format}',this.value)"
             style="width:78px;padding:6px 8px;text-align:center;font-family:'DM Mono',monospace"></td>`;
         }
         if (allowsVeto) {
           html += `<td style="text-align:center">
-            <div class="veto-toggle ${data.veto ? 'active' : ''}" onclick="toggleHelferVeto('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',this)">✕</div>
+            <div class="veto-toggle ${data.veto ? 'active' : ''}" onclick="toggleHelferVeto('${safeObs}','${safeCand}','${format}',this)">✕</div>
           </td>`;
         }
-        const notesVal = (data.notes || '').replace(/"/g, '&quot;');
-        html += `<td><textarea class="notes-input" rows="1" placeholder="Notizen…" onchange="setHelferNote('${obs.replace(/'/g,"\\'")}','${cand.replace(/'/g,"\\'")}','${format}',this.value)">${notesVal}</textarea></td>`;
         const slotInfo = `Slot ${entry.slot + 1}` + (entry.room != null ? `, R${entry.room + 1}` : '');
         html += `<td class="text-sm text-muted">${slotInfo}</td>`;
         html += '</tr>';
+
+        // ---- Row 2: per-criterion reason fields aligned below each score column ----
+        html += `<tr ${wkwConflict ? 'style="background:#fde8e6"' : ''} class="reason-row"><td class="reason-label">Begründung:</td>`;
+        criteria.forEach((cr, crIdx) => {
+          const reasonVal = (data.reasons[crIdx] || '').replace(/"/g,'&quot;');
+          html += `<td class="reason-cell"><textarea class="reason-input" rows="2" placeholder="Begründung…"
+            onchange="setHelferReason('${safeObs}','${safeCand}','${format}',${crIdx},this.value)">${reasonVal}</textarea></td>`;
+        });
+        // Empty cells for the remaining columns so the table grid stays aligned
+        if (hasZeitJct) html += '<td></td>';
+        if (allowsVeto) html += '<td></td>';
+        html += '<td></td>';  // slot column placeholder
+        html += '</tr>';
+
+        // ---- Row 3 (optional): general notes (full-width across all criteria) ----
+        const notesVal = (data.notes || '').replace(/"/g, '&quot;');
+        const totalCols = 1 + criteria.length + (hasZeitJct ? 1 : 0) + (allowsVeto ? 1 : 0) + 1;
+        html += `<tr ${wkwConflict ? 'style="background:#fde8e6"' : ''} class="notes-row">
+          <td colspan="${totalCols}" class="notes-cell">
+            <textarea class="notes-input-wide" rows="1" placeholder="Allgemeine Notizen zu ${cand} (optional)…"
+              onchange="setHelferNote('${safeObs}','${safeCand}','${format}',this.value)">${notesVal}</textarea>
+          </td>
+        </tr>`;
       });
-      html += '</tbody></table>';
+      html += '</tbody></table></div>';
     });
 
     html += `<p style="margin-top:1.5rem;font-size:11px;color:var(--text-muted)"><strong>Skala:</strong> 1 = sehr gut · 2 = gut · 3 = befriedigend · 4 = ausreichend · 5 = mangelhaft &nbsp;|&nbsp; <strong>Veto</strong> (nur in Interviews verfügbar): Bewerber:in nicht aufnehmen.</p>
@@ -3023,8 +3118,18 @@ function toggleHelferVeto(obs, cand, format, el) {
 function setHelferNote(obs, cand, format, val) {
   const key = cand + '||' + format;
   if (!state.helferScores[obs]) state.helferScores[obs] = {};
-  if (!state.helferScores[obs][key]) state.helferScores[obs][key] = { scores: [], veto: false, notes: '' };
+  if (!state.helferScores[obs][key]) state.helferScores[obs][key] = { scores: [], veto: false, notes: '', reasons: [] };
   state.helferScores[obs][key].notes = val;
+  pushHelferScores(obs);
+}
+
+// Per-criterion reason text. Stored in data.reasons[crIdx].
+function setHelferReason(obs, cand, format, crIdx, val) {
+  const key = cand + '||' + format;
+  if (!state.helferScores[obs]) state.helferScores[obs] = {};
+  if (!state.helferScores[obs][key]) state.helferScores[obs][key] = { scores: [], veto: false, notes: '', reasons: [] };
+  if (!Array.isArray(state.helferScores[obs][key].reasons)) state.helferScores[obs][key].reasons = [];
+  state.helferScores[obs][key].reasons[crIdx] = val;
   pushHelferScores(obs);
 }
 
