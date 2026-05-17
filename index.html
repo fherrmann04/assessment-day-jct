@@ -1320,18 +1320,24 @@ async function firebaseInit() {
     setSyncStatus('local', 'Lokal (kein Firebase)');
     return false;
   }
-  // Wait for SDK init to complete (window.__firebase.db is set after init)
-  if (!window.__firebase.db) {
+  // Wait for SDK init AND anonymous sign-in to complete.
+  // The 'firebase-ready' event is only dispatched once auth state has user.
+  if (!window.__firebase.user) {
     await new Promise(resolve => {
       const handler = () => resolve();
       window.addEventListener('firebase-ready', handler, { once: true });
       window.addEventListener('firebase-error', handler, { once: true });
-      setTimeout(resolve, 8000);
+      // Poll fallback
+      const start = Date.now();
+      const poll = setInterval(() => {
+        if (window.__firebase.user || window.__firebase.error) { clearInterval(poll); resolve(); }
+        if (Date.now() - start > 10000) { clearInterval(poll); resolve(); }
+      }, 50);
     });
   }
-  if (!window.__firebase.db) {
+  if (!window.__firebase.user) {
     sync.enabled = false;
-    setSyncStatus('offline', 'Firebase-Fehler');
+    setSyncStatus('offline', 'Anmeldung fehlgeschlagen');
     return false;
   }
   sync.enabled = true;
@@ -1396,7 +1402,14 @@ async function firebaseSubscribe() {
         if (change.type === 'removed') {
           delete state.helferScores[obsName];
         } else {
-          state.helferScores[obsName] = change.doc.data().scores || {};
+          const data = change.doc.data();
+          // Support both new (scoresJson) and legacy (scores) formats
+          if (data.scoresJson) {
+            try { state.helferScores[obsName] = JSON.parse(data.scoresJson); }
+            catch (e) { state.helferScores[obsName] = {}; }
+          } else {
+            state.helferScores[obsName] = data.scores || {};
+          }
         }
       });
       // Re-render dependent views
@@ -1439,7 +1452,9 @@ function serializeSetup() {
     writtenSupervisors: state.writtenSupervisors,
     wkw: wkwSer,
     config: state.config,
-    rotation: state.rotation,
+    // Rotation contains nested arrays (slotRooms is an array of arrays) which
+    // Firestore does not support. Serialize as a JSON string to side-step this.
+    rotationJson: state.rotation ? JSON.stringify(state.rotation) : null,
     updatedAt: window.__firebase.serverTimestamp(),
   };
 }
@@ -1458,7 +1473,13 @@ function applyRemoteSetup(data) {
     state.wkw[obs] = new Set(arr);
   });
   if (data.config) state.config = data.config;
-  state.rotation = data.rotation || null;
+  // Restore rotation from JSON string. Fall back to legacy 'rotation' field for backward compat.
+  if (data.rotationJson) {
+    try { state.rotation = JSON.parse(data.rotationJson); }
+    catch (e) { console.error('Failed to parse rotationJson:', e); state.rotation = null; }
+  } else {
+    state.rotation = data.rotation || null;
+  }
 
   // Re-render everything
   ['candidates','interviewersFixed','interviewersRotating','caseObserversFixed','caseObserversRotating','groupObservers','writtenSupervisors'].forEach(list => renderPersonList(list));
@@ -1505,9 +1526,13 @@ function pushHelferScores(observerName) {
   sync.pendingTimers[observerName] = setTimeout(async () => {
     try {
       const { db, doc, setDoc } = window.__firebase;
+      // Serialize scores as JSON to avoid any nested-array issues
       await setDoc(
         doc(db, 'events', EVENT_ID, 'helferScores', observerName),
-        { scores: state.helferScores[observerName] || {}, updatedAt: window.__firebase.serverTimestamp() }
+        {
+          scoresJson: JSON.stringify(state.helferScores[observerName] || {}),
+          updatedAt: window.__firebase.serverTimestamp(),
+        }
       );
     } catch (err) {
       console.error('Score push failed for ' + observerName + ':', err);
