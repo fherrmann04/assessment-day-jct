@@ -1486,6 +1486,9 @@ function applyRemoteSetup(data) {
   updateCounts();
   updateWkwTable();
   if (state.rotation) {
+    // Make sure helferScores has slots for every (observer, candidate, format)
+    // combination before any render reads from it.
+    initHelferScoresFromRotation();
     renderRotation();
     renderTeilnehmersheets();
     renderHelfersheets();
@@ -2794,6 +2797,8 @@ function renderHelfersheets() {
       byFormat[format].forEach(entry => {
         const cand = entry.candidate;
         const key = cand + '||' + format;
+        // Ensure the observer's score map exists (might not be loaded yet from Firestore)
+        if (!state.helferScores[obs]) state.helferScores[obs] = {};
         if (!state.helferScores[obs][key]) {
           state.helferScores[obs][key] = { scores: criteria.map(() => null), veto: false, notes: '' };
         }
