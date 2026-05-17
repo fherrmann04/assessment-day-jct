@@ -669,11 +669,12 @@ tr:hover td { background: #faf9f7; }
   background: var(--bg);
   z-index: 9999;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 1rem;
+  padding: 2rem 1rem;
+  overflow-y: auto;
 }
-.login-overlay .setup-lock-card { max-width: 520px; }
+.login-overlay .setup-lock-card { max-width: 520px; margin: auto; }
 .login-options {
   display: flex;
   flex-direction: column;
@@ -763,10 +764,12 @@ tr:hover td { background: #faf9f7; }
   background: rgba(6, 20, 48, 0.6);
   z-index: 500;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 1rem;
+  padding: 2rem 1rem;
+  overflow-y: auto;
 }
+.modal-overlay > * { margin: auto; }
 
 /* CANDIDATE LIST */
 .candidate-list {
