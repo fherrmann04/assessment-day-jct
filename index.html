@@ -968,13 +968,8 @@ tr:hover td { background: #faf9f7; }
     <div class="setup-lock-card">
       <div class="setup-lock-icon">🔒</div>
       <h2>Setup geschützt</h2>
-      <p>Das Setup kann nur von Organisator:innen geändert werden. Andere Beobachter:innen finden ihre Bögen in <strong>Helfersheets</strong>.</p>
-      <div class="setup-lock-input">
-        <input type="password" id="setup-pwd" placeholder="Passwort"
-               onkeydown="if(event.key==='Enter')checkSetupPassword()">
-        <button class="btn btn-primary" onclick="checkSetupPassword()">Entsperren</button>
-      </div>
-      <div id="setup-lock-error" class="setup-lock-error"></div>
+      <p>Das Setup kann nur von Organisator:innen geändert werden. Logge dich über den Login-Bildschirm als Organisator:in ein, um Zugriff zu erhalten. Beobachter:innen finden ihre Bögen in <strong>Helfersheets</strong>.</p>
+      <button class="btn btn-secondary btn-sm" onclick="logout()">Zum Login</button>
     </div>
   </div>
 
@@ -1106,18 +1101,13 @@ tr:hover td { background: #faf9f7; }
 <!-- ============================================================ ROTATION ============================================================ -->
 <div id="view-rotation" class="view">
 
-  <!-- Password lock overlay (same password as setup) -->
+  <!-- Lock overlay (entry via Org login only) -->
   <div id="rotation-lock" class="setup-lock">
     <div class="setup-lock-card">
       <div class="setup-lock-icon">🔒</div>
       <h2>Rotationsplan geschützt</h2>
-      <p>Der Rotationsplan kann nur von Organisator:innen eingesehen werden. Beobachter:innen finden ihre Zuteilung direkt in <strong>Helfersheets</strong>.</p>
-      <div class="setup-lock-input">
-        <input type="password" id="rotation-pwd" placeholder="Passwort"
-               onkeydown="if(event.key==='Enter')checkRotationPassword()">
-        <button class="btn btn-primary" onclick="checkRotationPassword()">Entsperren</button>
-      </div>
-      <div id="rotation-lock-error" class="setup-lock-error"></div>
+      <p>Der Rotationsplan kann nur von Organisator:innen eingesehen werden. Logge dich über den Login-Bildschirm als Organisator:in ein. Beobachter:innen finden ihre Zuteilung direkt in <strong>Helfersheets</strong>.</p>
+      <button class="btn btn-secondary btn-sm" onclick="logout()">Zum Login</button>
     </div>
   </div>
 
@@ -1289,6 +1279,9 @@ const EVENT_ID = 'assessment-day-current';  // change per event if you want hist
 const sync = {
   enabled: false,
   ready: false,
+  // True once the first setup snapshot has been received from Firestore.
+  // Until then, no writes are allowed (would overwrite remote data).
+  firstSyncDone: false,
   // 'org' (full edit) or 'observer:Name' (limited to own scores) or null (not logged in)
   identity: null,
   // Track pending writes to debounce score saves
@@ -1363,22 +1356,37 @@ async function firebaseSubscribe() {
   const { db, doc, onSnapshot, collection } = window.__firebase;
   // Listen to setup
   const setupRef = doc(db, 'events', EVENT_ID, 'meta', 'setup');
-  const unsubSetup = onSnapshot(setupRef, snap => {
-    if (!snap.exists()) return;
-    sync.applyingRemote = true;
-    try {
-      const data = snap.data();
-      applyRemoteSetup(data);
-    } finally {
-      sync.applyingRemote = false;
-    }
-  }, err => {
-    console.error('Setup listener error:', err);
-    setSyncStatus('offline', 'Offline');
-  });
-  sync.unsubscribers.push(unsubSetup);
 
-  // Listen to all helferScores
+  // We need to wait for the FIRST snapshot before allowing any writes,
+  // otherwise we might overwrite existing remote data with our empty local state.
+  let firstSnapshotReceived = false;
+  const firstSnapshotPromise = new Promise(resolve => {
+    const unsubSetup = onSnapshot(setupRef, snap => {
+      sync.applyingRemote = true;
+      try {
+        if (snap.exists()) {
+          const data = snap.data();
+          applyRemoteSetup(data);
+        }
+        if (!firstSnapshotReceived) {
+          firstSnapshotReceived = true;
+          resolve(snap.exists());
+        }
+      } finally {
+        sync.applyingRemote = false;
+      }
+    }, err => {
+      console.error('Setup listener error:', err);
+      setSyncStatus('offline', 'Offline');
+      if (!firstSnapshotReceived) {
+        firstSnapshotReceived = true;
+        resolve(false);
+      }
+    });
+    sync.unsubscribers.push(unsubSetup);
+  });
+
+  // Listen to all helferScores (these can fire any time, no need to wait)
   const scoresRef = collection(db, 'events', EVENT_ID, 'helferScores');
   const unsubScores = onSnapshot(scoresRef, snap => {
     sync.applyingRemote = true;
@@ -1405,12 +1413,12 @@ async function firebaseSubscribe() {
   });
   sync.unsubscribers.push(unsubScores);
 
-  // Ensure setup document exists
-  const { getDoc, setDoc } = window.__firebase;
-  const existing = await getDoc(setupRef);
-  if (!existing.exists()) {
-    await setDoc(setupRef, serializeSetup());
-  }
+  // Wait for first setup snapshot. If the doc doesn't exist remotely AND
+  // the local state is also empty, that's fine — we just stay empty.
+  // We do NOT write an empty doc to Firestore on init, because that would
+  // overwrite any data another client just added.
+  const existsRemotely = await firstSnapshotPromise;
+  sync.firstSyncDone = true;
 }
 
 // Serialize setup-related state into a plain object for Firestore.
@@ -1472,6 +1480,9 @@ let setupPushTimer = null;
 function pushSetup() {
   if (!sync.enabled || !sync.ready || sync.applyingRemote) return;
   if (sync.identity !== 'org') return;  // observers cannot push setup
+  // Critical safety check: don't push until we've received the first snapshot,
+  // otherwise we'd overwrite remote data with our empty local state.
+  if (!sync.firstSyncDone) return;
   clearTimeout(setupPushTimer);
   setupPushTimer = setTimeout(async () => {
     try {
@@ -1487,6 +1498,7 @@ function pushSetup() {
 // Push helferScores for one observer (debounced per observer)
 function pushHelferScores(observerName) {
   if (!sync.enabled || !sync.ready || sync.applyingRemote) return;
+  if (!sync.firstSyncDone) return;
   // Only org or the observer themselves may write to their scores doc
   if (sync.identity !== 'org' && sync.identity !== 'observer:' + observerName) return;
   clearTimeout(sync.pendingTimers[observerName]);
